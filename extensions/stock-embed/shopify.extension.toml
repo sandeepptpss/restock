@@ -1,0 +1,13 @@
+name = "Stock Control Theme Embed"
+type = "theme"
+uid = "9db7c086-1d4d-ff8e-30e4-0f8498b8f6de2ec3bfb2"
+
+[blocks.stock_badge]
+name = "Stock Badge & Alert"
+target = "head"
+template = "blocks/stock_badge.liquid"
+
+[blocks.notify_me]
+name = "Out of Stock Notify Me"
+target = "section"
+template = "blocks/notify_me.liquid"

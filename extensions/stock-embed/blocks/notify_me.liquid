@@ -1,0 +1,38 @@
+{% comment %}
+  Out of Stock Notify Me Form Block
+{% endcomment %}
+{% if product and product.available == false %}
+  <div id="stock-notify-container" style="margin: 16px 0; padding: 16px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+    <h4 style="margin: 0 0 8px 0; font-size: 14px; color: #1e293b;">📩 Notify Me When Back in Stock</h4>
+    <p style="margin: 0 0 12px 0; font-size: 12px; color: #64748b;">Enter your email to receive an instant alert when this item is restocked.</p>
+    <div style="display: flex; gap: 8px;">
+      <input type="email" id="stock-notify-email" placeholder="your@email.com" style="flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px;">
+      <button type="button" onclick="submitStockNotify()" style="background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px;">Subscribe</button>
+    </div>
+    <div id="stock-notify-msg" style="display: none; margin-top: 8px; font-size: 12px; color: #16a34a; font-weight: 600;">Thanks! We will notify you as soon as this item is back in stock.</div>
+  </div>
+  <script>
+    function submitStockNotify() {
+      var email = document.getElementById('stock-notify-email').value;
+      if (email) {
+        document.getElementById('stock-notify-msg').style.display = 'block';
+        document.getElementById('stock-notify-email').value = '';
+      }
+    }
+  </script>
+{% endif %}
+
+{% schema %}
+{
+  "name": "Notify Me When Restocked",
+  "target": "section",
+  "settings": [
+    {
+      "type": "text",
+      "id": "notify_title",
+      "label": "Form Title",
+      "default": "Notify Me When Back in Stock"
+    }
+  ]
+}
+{% endschema %}

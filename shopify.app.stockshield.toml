@@ -1,0 +1,32 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "13757d47ccf2646fbbdf569cad75a351"
+application_url = "https://example.com"
+embedded = true
+name = "stockshield "
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_publications,write_publications,write_metaobjects,write_metaobject_definitions"
+
+[auth]
+redirect_urls = [ "https://example.com/api/auth" ]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/inventory_levels/update"
+  topics = [ "inventory_levels/update" ]
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true

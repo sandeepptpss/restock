@@ -1,0 +1,143 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model InventorySettings {
+  id                     String   @id @default(uuid())
+  shop                   String   @unique
+  defaultLowStockLimit   Int      @default(5)
+  visibilityMode         String   @default("DRAFT") // TAG_ONLY, DRAFT, UNPUBLISH_CHANNEL, UNLISTED
+  variantStrategy        String   @default("HIDE_ALL_OOS") // HIDE_ALL_OOS, HIDE_ANY_OOS, HIDE_THRESHOLD, KEEP_VISIBLE
+  locationStrategy       String   @default("ALL_LOCATIONS") // ALL_LOCATIONS, PRIMARY_LOCATION, SELECTED_LOCATION
+  restockDelayValue      Int      @default(0)
+  restockDelayUnit       String   @default("IMMEDIATE") // IMMEDIATE, MINUTES, HOURS, DAYS, MONTHS
+  enableAutoFill         Boolean  @default(false)
+  autoFillQuantity       Int      @default(10)
+  enableAutoHide         Boolean  @default(true)
+  enableAutoTag          Boolean  @default(true)
+  outOfStockTag          String   @default("out-of-stock")
+  lowStockTag            String   @default("low-stock")
+  enableAutoPublish      Boolean  @default(true)
+  enableCollectionAction Boolean  @default(false)
+  outOfStockCollectionId String?
+  removeFromCollectionId String?
+  enableEmailAlerts      Boolean  @default(true)
+  alertEmail             String?
+  leadTimeDays           Int      @default(14)
+  targetStockDays        Int      @default(30)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+model ProductThreshold {
+  id               String   @id @default(uuid())
+  shop             String
+  productId        String
+  variantId        String?
+  minThreshold     Int      @default(5)
+  customReorderQty Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([shop, productId, variantId])
+}
+
+model AutomationRule {
+  id         String   @id @default(uuid())
+  shop       String
+  name       String
+  trigger    String   @default("inventory_levels/update")
+  conditions String // JSON stringified conditions (e.g. available <= 0)
+  actions    String // JSON stringified actions (e.g. tag, hide, collection)
+  status     String   @default("ACTIVE") // ACTIVE, DISABLED
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([shop])
+}
+
+model InventoryEvent {
+  id              String   @id @default(uuid())
+  shop            String
+  inventoryItemId String
+  variantId       String?
+  locationId      String?
+  oldQuantity     Int?
+  newQuantity     Int
+  eventType       String   @default("STOCKOUT") // STOCKOUT, RESTOCK, LOW_STOCK
+  webhookId       String?  @unique
+  createdAt       DateTime @default(now())
+
+  @@index([shop, inventoryItemId])
+}
+
+model AutomationLog {
+  id           String   @id @default(uuid())
+  shop         String
+  ruleId       String?
+  eventType    String   @default("INFO") // AUTO_HIDE, RESTOCK, SCHEDULED_RESTOCK, AUTO_FILL_RESTOCK, EMAIL_ALERT, SCAN_COMPLETE
+  productId    String?
+  productTitle String
+  variantTitle String?
+  sku          String?
+  quantity     Int
+  actionTaken  String
+  status       String   @default("SUCCESS") // SUCCESS, PARTIAL, FAILED
+  details      String?
+  createdAt    DateTime @default(now())
+
+  @@index([shop, productId])
+}
+
+model Subscription {
+  id          String    @id @default(uuid())
+  shop        String    @unique
+  plan        String    @default("PRO") // STARTER, PRO, ENTERPRISE
+  status      String    @default("ACTIVE")
+  startedAt   DateTime  @default(now())
+  cancelledAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+model ScheduledRestock {
+  id              String   @id @default(uuid())
+  shop            String
+  productId       String
+  variantId       String
+  inventoryItemId String
+  locationId      String?
+  targetQuantity  Int      @default(10)
+  scheduledAt     DateTime
+  status          String   @default("PENDING") // PENDING, EXECUTED, FAILED, CANCELLED
+  createdAt       DateTime @default(now())
+
+  @@index([shop, status, scheduledAt])
+}

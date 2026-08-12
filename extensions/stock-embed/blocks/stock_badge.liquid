@@ -1,0 +1,57 @@
+{% comment %}
+  Smart Stock Control Theme App Embed Block
+  Injects real-time stock badges and inventory alerts onto Shopify product pages
+{% endcomment %}
+{% if product %}
+  <script>
+    window.StockControlEmbed = {
+      productId: {{ product.id | json }},
+      variants: {{ product.variants | json }},
+      outOfStockTag: "out-of-stock",
+      lowStockTag: "low-stock"
+    };
+  </script>
+  <style>
+    .stock-badge-container {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      margin: 8px 0;
+    }
+    .stock-badge-low {
+      background-color: #fef3c7;
+      color: #92400e;
+      border: 1px solid #fcd34d;
+    }
+    .stock-badge-out {
+      background-color: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fca5a5;
+    }
+  </style>
+{% endif %}
+
+{% schema %}
+{
+  "name": "Stock Control Embed",
+  "target": "head",
+  "settings": [
+    {
+      "type": "checkbox",
+      "id": "enable_low_stock_badge",
+      "label": "Show Low Stock Warning Badge",
+      "default": true
+    },
+    {
+      "type": "text",
+      "id": "low_stock_text",
+      "label": "Low Stock Badge Text",
+      "default": "🔥 Only a few items left in stock!"
+    }
+  ]
+}
+{% endschema %}
