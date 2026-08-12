@@ -240,14 +240,67 @@ export async function createAutomationRule(shop, { name, trigger, conditions, ac
   });
 }
 
+export const INVENTORY_TRANSITION = {
+  RESTOCK: "RESTOCK",
+  STOCKOUT: "STOCKOUT",
+  NONE: "NONE",
+};
+
+/**
+ * Classify an inventory change from the quantity it had to the quantity it has.
+ *
+ * Only a crossing of the zero boundary is an event worth acting on:
+ *   0 -> 1   RESTOCK      1 -> 0   STOCKOUT
+ *   0 -> 5   RESTOCK      0 -> 0   NONE
+ *   1 -> 1   NONE         5 -> 3   NONE  (a sale, not a stockout)
+ *
+ * When there is no previously recorded quantity the crossing cannot be proven, so
+ * the current state is reported with `hasPrevious: false` and the caller is
+ * expected to corroborate it against the product itself (is it actually hidden or
+ * tagged?) before taking an action.
+ */
+export function classifyInventoryTransition(oldQuantity, newQuantity) {
+  const newQty = Number(newQuantity) || 0;
+  const hasPrevious = oldQuantity != null && Number.isFinite(Number(oldQuantity));
+
+  if (!hasPrevious) {
+    return {
+      type: newQty > 0 ? INVENTORY_TRANSITION.RESTOCK : INVENTORY_TRANSITION.STOCKOUT,
+      oldQuantity: null,
+      newQuantity: newQty,
+      hasPrevious: false,
+    };
+  }
+
+  const oldQty = Number(oldQuantity);
+  let type = INVENTORY_TRANSITION.NONE;
+  if (oldQty <= 0 && newQty > 0) type = INVENTORY_TRANSITION.RESTOCK;
+  else if (oldQty > 0 && newQty <= 0) type = INVENTORY_TRANSITION.STOCKOUT;
+
+  return { type, oldQuantity: oldQty, newQuantity: newQty, hasPrevious: true };
+}
+
+/**
+ * Human-readable form of a transition, for logs: "0 → 5 (RESTOCK)".
+ */
+export function describeTransition(transition) {
+  if (!transition) return "unknown transition";
+  const from = transition.hasPrevious ? transition.oldQuantity : "unknown";
+  return `${from} → ${transition.newQuantity} (${transition.type}${transition.hasPrevious ? "" : ", first observation"})`;
+}
+
 /**
  * Record idempotent inventory event.
  *
  * The previous quantity is carried over from the last recorded event for the same
- * inventory item, which is what makes observed sales velocity possible later.
+ * inventory item at the same location, which is what makes both the zero-crossing
+ * classification above and observed sales velocity possible later.
  */
 export async function recordInventoryEvent(shop, params) {
-  if (!prisma?.inventoryEvent) return { isDuplicate: false };
+  if (!prisma?.inventoryEvent) {
+    const newQuantity = typeof params === "object" ? Number(params?.newQuantity || 0) : 0;
+    return { isDuplicate: false, transition: classifyInventoryTransition(null, newQuantity) };
+  }
   try {
     const webhookId = typeof params === "object" ? params?.webhookId : (params ? String(params) : null);
     const inventoryItemId = typeof params === "object" ? String(params?.inventoryItemId || "") : "";
@@ -264,17 +317,26 @@ export async function recordInventoryEvent(shop, params) {
 
     let oldQuantity = null;
     if (inventoryItemId) {
+      // Scoped to the location as well: `available` in the webhook payload is
+      // per-location, so the last event from a *different* location is not this
+      // item's previous quantity.
       const previous = await prisma.inventoryEvent.findFirst({
-        where: { shop, inventoryItemId },
+        where: { shop, inventoryItemId, ...(locationId ? { locationId } : {}) },
         orderBy: { createdAt: "desc" },
         select: { newQuantity: true },
       });
       oldQuantity = previous ? previous.newQuantity : null;
     }
 
-    let eventType = "STOCKOUT";
-    if (newQuantity > 0) {
-      eventType = oldQuantity != null && newQuantity > oldQuantity ? "RESTOCK" : "LOW_STOCK";
+    const transition = classifyInventoryTransition(oldQuantity, newQuantity);
+
+    // Stored purely as an audit label — automation decisions use `transition`.
+    let eventType = transition.type;
+    if (!transition.hasPrevious) {
+      eventType = "INITIAL";
+    } else if (eventType === INVENTORY_TRANSITION.NONE) {
+      eventType =
+        newQuantity > oldQuantity ? "INCREASE" : newQuantity < oldQuantity ? "DECREASE" : "NO_CHANGE";
     }
 
     const created = await prisma.inventoryEvent.create({
@@ -289,10 +351,11 @@ export async function recordInventoryEvent(shop, params) {
       },
     });
 
-    return { isDuplicate: false, event: created };
+    return { isDuplicate: false, event: created, transition };
   } catch (err) {
     console.warn("Error recording inventory event (skipped gracefully):", err.message);
-    return { isDuplicate: false };
+    const newQuantity = typeof params === "object" ? Number(params?.newQuantity || 0) : 0;
+    return { isDuplicate: false, transition: classifyInventoryTransition(null, newQuantity) };
   }
 }
 
@@ -665,9 +728,12 @@ export async function runStockoutAutomationScan(admin, shop) {
           details: `Email delivery is not configured in this deployment${settings.alertEmail ? ` (intended recipient: ${settings.alertEmail})` : ""}`,
         });
       }
-    } 
-    // 2. RESTOCK AUTOMATIONS
-    else if (totalProdInventory > 0) {
+    }
+    // 2. RESTOCK AUTOMATIONS — at least one variant is buyable, so any restock job
+    // still queued from an earlier stockout is obsolete.
+    else if (productItems.some((i) => i.inventoryQuantity > 0)) {
+      await cancelPendingRestocks(shop, productId);
+
       if (settings.enableAutoTag && firstItem.productTags.includes(settings.outOfStockTag)) {
         try {
           await admin.graphql(
@@ -695,10 +761,7 @@ export async function runStockoutAutomationScan(admin, shop) {
       // Reverse the visibility action for the configured mode. DRAFT/UNLISTED only
       // need restoring when the product is actually in that state; the channel mode
       // has no status to inspect, so it is always re-published.
-      const needsRestore =
-        settings.visibilityMode === "UNPUBLISH_CHANNEL" ||
-        (settings.visibilityMode === "UNLISTED" && firstItem.productStatus === "UNLISTED") ||
-        ((settings.visibilityMode || "DRAFT") === "DRAFT" && firstItem.productStatus === "DRAFT");
+      const needsRestore = needsVisibilityRestore(firstItem.productStatus, settings.visibilityMode);
 
       if (settings.enableAutoPublish && needsRestore) {
         const restored = await restoreProductVisibility(admin, {
@@ -1137,8 +1200,8 @@ export function evaluateStockoutCondition(quantities, strategy) {
   const qtys = (Array.isArray(quantities) ? quantities : []).map((q) => Number(q) || 0);
   if (qtys.length === 0) return false;
 
-  const total = qtys.reduce((sum, q) => sum + q, 0);
   const availableVariantCount = qtys.filter((q) => q > 0).length;
+  const allOutOfStock = availableVariantCount === 0;
 
   switch (strategy) {
     // Never hide — out-of-stock variants simply become unpurchasable in the theme.
@@ -1150,10 +1213,51 @@ export function evaluateStockoutCondition(quantities, strategy) {
     // products; a single-variant product falls back to plain stockout, otherwise
     // every in-stock single-variant product would be hidden.
     case "HIDE_THRESHOLD":
-      return qtys.length > 1 ? availableVariantCount < 2 : total <= 0;
+      return qtys.length > 1 ? availableVariantCount < 2 : allOutOfStock;
     case "HIDE_ALL_OOS":
     default:
-      return total <= 0;
+      // Every variant must be empty. Summing quantities was wrong: one variant
+      // oversold to -5 cancelled out another variant's +3 and hid a product that
+      // was still buyable.
+      return allOutOfStock;
+  }
+}
+
+/**
+ * Whether a product still needs its visibility restored, given the mode that
+ * would have hidden it. Used to keep a restock from re-issuing an ACTIVE update
+ * (and a duplicate log line) against a product that is already visible.
+ */
+export function needsVisibilityRestore(productStatus, visibilityMode) {
+  const mode = visibilityMode || "DRAFT";
+  if (mode === "TAG_ONLY") return false;
+  // The channel mode has no product status to inspect, so it is always re-published.
+  if (mode === "UNPUBLISH_CHANNEL") return true;
+  if (mode === "UNLISTED") return productStatus === "UNLISTED";
+  return productStatus === "DRAFT";
+}
+
+/**
+ * Cancel restock jobs still queued for a product that has come back into stock.
+ *
+ * Those jobs exist only to recover from the stockout that scheduled them; once
+ * the product is buyable again, firing one would auto-fill over the merchant's
+ * own quantity and emit a second RESTOCK/ACTIVE action for the same recovery.
+ */
+export async function cancelPendingRestocks(shop, productId) {
+  if (!prisma?.scheduledRestock || !shop || !productId) return 0;
+  try {
+    const { count } = await prisma.scheduledRestock.updateMany({
+      where: { shop, productId: ensureGid(productId, "Product"), status: "PENDING" },
+      data: { status: "CANCELLED" },
+    });
+    if (count > 0) {
+      console.log(`[ScheduledRestock] Cancelled ${count} pending job(s) for restocked product ${productId}`);
+    }
+    return count;
+  } catch (err) {
+    console.warn(`[ScheduledRestock] Failed to cancel pending jobs for ${productId}:`, err.message);
+    return 0;
   }
 }
 

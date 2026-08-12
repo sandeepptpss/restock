@@ -4,10 +4,15 @@ import {
   recordInventoryEvent,
   createAutomationLog,
   scheduleProductRestock,
+  cancelPendingRestocks,
   processPendingScheduledRestocks,
   evaluateStockoutCondition,
+  needsVisibilityRestore,
+  classifyInventoryTransition,
+  describeTransition,
   applyStockoutVisibility,
   restoreProductVisibility,
+  INVENTORY_TRANSITION,
 } from "../models/inventory.server";
 
 export const action = async ({ request }) => {
@@ -17,10 +22,12 @@ export const action = async ({ request }) => {
     return new Response(null, { status: 200 });
   }
 
-  const { inventory_item_id: inventoryItemId, available: newAvailable, location_id: locationId } = payload;
+  const { inventory_item_id: inventoryItemId, available, location_id: locationId } = payload;
+  const newAvailable = Number(available) || 0;
   const webhookId = request.headers.get("x-shopify-webhook-id") || `evt_${Date.now()}`;
 
-  // 1. Idempotency Check
+  // 1. Idempotency Check. This also resolves the quantity this item held before
+  // the change, which is what every decision below is made from.
   const eventRecord = await recordInventoryEvent(shop, {
     webhookId,
     inventoryItemId: String(inventoryItemId),
@@ -31,6 +38,9 @@ export const action = async ({ request }) => {
     console.log(`[Webhook] Duplicate webhook event skipped: ${webhookId}`);
     return new Response(null, { status: 200 });
   }
+
+  // 0 → >0 = RESTOCK, >0 → 0 = STOCKOUT, anything else = NONE.
+  const transition = eventRecord?.transition || classifyInventoryTransition(null, newAvailable);
 
   try {
     let admin = webhookAdmin;
@@ -53,6 +63,16 @@ export const action = async ({ request }) => {
     // durable path for the backlog).
     await processPendingScheduledRestocks(admin, shop, { limit: 3 });
 
+    // 2. Only a crossing of the zero boundary is actionable. 0 → 0 (a repeated
+    // webhook for an item that is still empty) and 5 → 3 (a sale) change nothing
+    // about the product's visibility, so they must not produce an action or a log.
+    if (transition.type === INVENTORY_TRANSITION.NONE) {
+      console.log(
+        `[Webhook] No actionable transition for inventory item ${inventoryItemId}: ${describeTransition(transition)}`
+      );
+      return new Response(null, { status: 200 });
+    }
+
     // Query product & variant associated with inventoryItemId
     const response = await admin.graphql(
       `#graphql
@@ -69,7 +89,8 @@ export const action = async ({ request }) => {
                 title
                 status
                 tags
-                variants(first: 50) {
+                variants(first: 100) {
+                  pageInfo { hasNextPage }
                   edges {
                     node {
                       id
@@ -105,21 +126,50 @@ export const action = async ({ request }) => {
     const settings = await getInventorySettings(shop);
     const logsToCreate = [];
 
-    // Evaluate total product inventory across all sellable variants
-    // Override current variant's quantity with `newAvailable` from webhook payload to prevent stale GraphQL reads
+    // 3. Evaluate EVERY variant of the parent product before touching the product.
+    // The variant this webhook is about is overridden with `newAvailable` from the
+    // payload, because the GraphQL read can still return its pre-change quantity.
     const prodVariants = product.variants?.edges?.map((e) => e.node) || [];
-    const totalProdInventory = prodVariants.reduce((sum, v) => {
-      const qty = String(v.id) === String(variant.id) ? newAvailable : (v.inventoryQuantity ?? 0);
-      return sum + qty;
-    }, 0);
-
     const variantQuantities = prodVariants.map((v) =>
       String(v.id) === String(variant.id) ? newAvailable : (v.inventoryQuantity ?? 0)
     );
-    const isStockoutCondition = evaluateStockoutCondition(variantQuantities, settings.variantStrategy);
+    const inStockVariants = variantQuantities.filter((q) => q > 0).length;
+    const variantSummary = `${inStockVariants}/${variantQuantities.length} variants in stock`;
 
-    // 2. STOCKOUT RULE EVALUATION (Quantity <= 0)
-    if (isStockoutCondition) {
+    // With more variants than one page holds we cannot prove they are all empty,
+    // so the product is never hidden on partial data.
+    const variantsTruncated = Boolean(product.variants?.pageInfo?.hasNextPage);
+    if (variantsTruncated) {
+      console.warn(
+        `[Webhook] Product ${product.id} has more than 100 variants; only the first 100 were evaluated, skipping any hide action`
+      );
+    }
+
+    const isStockoutCondition =
+      !variantsTruncated && evaluateStockoutCondition(variantQuantities, settings.variantStrategy);
+
+    console.log(
+      `[Webhook] ${product.title} / ${variant.title}: ${describeTransition(transition)} — ${variantSummary}, product ${product.status}`
+    );
+
+    // 4a. STOCKOUT — this variant just emptied (>0 → 0). The product itself is only
+    // hidden when the configured Variant Stockout Condition is met, which for the
+    // default strategy means every variant is out of stock.
+    if (transition.type === INVENTORY_TRANSITION.STOCKOUT && !isStockoutCondition) {
+      logsToCreate.push({
+        shop,
+        eventType: "VARIANT_STOCKOUT",
+        productId: product.id,
+        productTitle: product.title,
+        variantTitle: variant.title,
+        sku: variant.sku,
+        quantity: newAvailable,
+        actionTaken: `[Webhook Trigger] Variant out of stock — product left ${product.status} (${variantSummary})`,
+        status: "SUCCESS",
+      });
+    }
+    // 4b. STOCKOUT RULE EVALUATION (every variant now empty)
+    else if (transition.type === INVENTORY_TRANSITION.STOCKOUT) {
       const tagToApply = settings.outOfStockTag || "out-of-stock";
 
       // 1. Add Tag via tagsAdd GraphQL mutation (only if Auto-Tag is enabled)
@@ -200,14 +250,42 @@ export const action = async ({ request }) => {
         }
       }
     }
-    // 3. RESTOCK RULE EVALUATION (totalProdInventory > 0)
-    else if (totalProdInventory > 0) {
+    // 4c. RESTOCK RULE EVALUATION — this variant crossed 0 → >0.
+    else if (transition.type === INVENTORY_TRANSITION.RESTOCK) {
       const tagToRemove = settings.outOfStockTag || "out-of-stock";
       const existingTags = Array.isArray(product.tags) ? product.tags : [];
       const actions = [];
       const restockErrors = [];
 
-      if (settings.enableAutoTag !== false && existingTags.includes(tagToRemove)) {
+      // Under a strategy such as HIDE_ANY_OOS the product can still qualify as
+      // stocked out while this variant is buyable again — republishing it would
+      // fight the stockout rule.
+      if (isStockoutCondition) {
+        console.log(
+          `[Webhook] ${product.title} restocked on ${variant.title} but still meets the ${settings.variantStrategy} stockout condition (${variantSummary}); leaving it ${product.status}`
+        );
+        return new Response(null, { status: 200 });
+      }
+
+      // The product is buyable again, so a restock job queued by the earlier
+      // stockout would only auto-fill over the merchant's own quantity.
+      await cancelPendingRestocks(shop, product.id);
+
+      const tagNeedsRemoving = settings.enableAutoTag !== false && existingTags.includes(tagToRemove);
+      const visibilityNeedsRestoring =
+        settings.enableAutoPublish !== false && needsVisibilityRestore(product.status, settings.visibilityMode);
+
+      // Nothing left to undo — the product is already visible and untagged, which
+      // is the usual case for a repeated webhook. Acting anyway is what produced
+      // the duplicate "Set status to ACTIVE" entries in the audit trail.
+      if (!tagNeedsRemoving && !visibilityNeedsRestoring) {
+        console.log(
+          `[Webhook] ${product.title} restocked (${describeTransition(transition)}) but already visible and untagged; no action needed`
+        );
+        return new Response(null, { status: 200 });
+      }
+
+      if (tagNeedsRemoving) {
         try {
           const tagRes = await admin.graphql(
             `#graphql
@@ -233,7 +311,7 @@ export const action = async ({ request }) => {
       }
 
       // Reverse only the visibility action that the configured mode would have taken
-      if (settings.enableAutoPublish !== false) {
+      if (visibilityNeedsRestoring) {
         const restored = await restoreProductVisibility(admin, {
           productId: product.id,
           visibilityMode: settings.visibilityMode,
@@ -255,7 +333,7 @@ export const action = async ({ request }) => {
         variantTitle: variant.title,
         sku: variant.sku,
         quantity: newAvailable,
-        actionTaken: `[Webhook Trigger] ${actions.join(" & ") || "No visibility change required"} on restock`,
+        actionTaken: `[Webhook Trigger] ${actions.join(" & ")} on restock (${variantSummary})`,
         status: restockErrors.length > 0 ? "FAILED" : "SUCCESS",
         details: restockErrors.length > 0 ? restockErrors.join(" | ") : null,
       });

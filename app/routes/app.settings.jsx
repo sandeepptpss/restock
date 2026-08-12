@@ -170,19 +170,19 @@ export default function Settings() {
             </button>
           </div>
 
-          {/* Starter Tier */}
+          {/* Growth Tier */}
           <div
             style={{
-              border: selectedPlan === "STARTER" ? "2px solid #6366f1" : "1px solid var(--border-color)",
+              border: selectedPlan === "GROWTH" ? "2px solid #6366f1" : "1px solid var(--border-color)",
               borderRadius: "12px",
               padding: "20px",
-              background: selectedPlan === "STARTER" ? "#f5f3ff" : "#ffffff",
+              background: selectedPlan === "GROWTH" ? "#f5f3ff" : "#ffffff",
               transition: "all 0.2s ease",
             }}
           >
             <h3 style={{ margin: "0 0 8px 0", fontSize: "16px" }}>Growth</h3>
             <div style={{ fontSize: "24px", fontWeight: "700", color: "#312e81", marginBottom: "12px" }}>
-              $9 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
+              $3.99 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
             </div>
             <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px" }}>
               Small stores and core automation
@@ -193,21 +193,21 @@ export default function Settings() {
               <li>Auto-Hide / Draft mode</li>
             </ul>
             <button
-              onClick={() => handlePlanSelect("STARTER")}
+              onClick={() => handlePlanSelect("GROWTH")}
               className="btn-secondary"
               style={{ width: "100%", padding: "8px" }}
             >
-              {selectedPlan === "STARTER" ? "Current Active Plan" : "Choose Starter"}
+              {selectedPlan === "GROWTH" ? "Current Active Plan" : "Choose Growth"}
             </button>
           </div>
 
-          {/* Pro Tier */}
+          {/* Pro Automation Tier */}
           <div
             style={{
-              border: selectedPlan === "GROWTH" ? "2px solid #6366f1" : "1px solid var(--border-color)",
+              border: selectedPlan === "PRO" ? "2px solid #6366f1" : "1px solid var(--border-color)",
               borderRadius: "12px",
               padding: "20px",
-              background: selectedPlan === "GROWTH" ? "#f5f3ff" : "#ffffff",
+              background: selectedPlan === "PRO" ? "#f5f3ff" : "#ffffff",
               boxShadow: "0 4px 12px rgba(99, 102, 241, 0.15)",
               position: "relative",
             }}
@@ -229,7 +229,7 @@ export default function Settings() {
             </span>
             <h3 style={{ margin: "0 0 8px 0", fontSize: "16px" }}>Pro Automation</h3>
             <div style={{ fontSize: "24px", fontWeight: "700", color: "#312e81", marginBottom: "12px" }}>
-              $29 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
+              $15.99 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
             </div>
             <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px" }}>
               Larger catalogs, alerts, rules, multi-location
@@ -241,11 +241,11 @@ export default function Settings() {
               <li>Email alerts &amp; Collection rules</li>
             </ul>
             <button
-              onClick={() => handlePlanSelect("GROWTH")}
+              onClick={() => handlePlanSelect("PRO")}
               className="btn-primary"
               style={{ width: "100%", padding: "8px" }}
             >
-              {selectedPlan === "GROWTH" ? "Current Active Plan" : "Select Pro"}
+              {selectedPlan === "PRO" ? "Current Active Plan" : "Select Pro"}
             </button>
           </div>
 
@@ -261,7 +261,7 @@ export default function Settings() {
           >
             <h3 style={{ margin: "0 0 8px 0", fontSize: "16px" }}>Enterprise</h3>
             <div style={{ fontSize: "24px", fontWeight: "700", color: "#312e81", marginBottom: "12px" }}>
-              $79 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
+              $29.99 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
             </div>
             <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px" }}>
               High-volume automation, forecasting &amp; integrations
@@ -277,7 +277,7 @@ export default function Settings() {
               className="btn-secondary"
               style={{ width: "100%", padding: "8px" }}
             >
-              {selectedPlan === "ENTERPRISE" ? "Current Active Plan" : "Upgrade to Pro"}
+              {selectedPlan === "ENTERPRISE" ? "Current Active Plan" : "Upgrade to Enterprise"}
             </button>
           </div>
         </div>

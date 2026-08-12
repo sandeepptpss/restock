@@ -92,7 +92,7 @@ model InventoryEvent {
   locationId      String?
   oldQuantity     Int?
   newQuantity     Int
-  eventType       String   @default("STOCKOUT") // STOCKOUT, RESTOCK, LOW_STOCK
+  eventType       String   @default("STOCKOUT") // RESTOCK (0 -> >0), STOCKOUT (>0 -> 0), INCREASE, DECREASE, NO_CHANGE, INITIAL (no prior quantity)
   webhookId       String?  @unique
   createdAt       DateTime @default(now())
 
@@ -103,7 +103,7 @@ model AutomationLog {
   id           String   @id @default(uuid())
   shop         String
   ruleId       String?
-  eventType    String   @default("INFO") // AUTO_HIDE, RESTOCK, SCHEDULED_RESTOCK, AUTO_FILL_RESTOCK, EMAIL_ALERT, SCAN_COMPLETE
+  eventType    String   @default("INFO") // AUTO_HIDE, RESTOCK, VARIANT_STOCKOUT, SCHEDULED_RESTOCK, AUTO_FILL_RESTOCK, EMAIL_ALERT, SCAN_COMPLETE
   productId    String?
   productTitle String
   variantTitle String?
