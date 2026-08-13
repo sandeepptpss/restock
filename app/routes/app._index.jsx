@@ -11,12 +11,35 @@ import {
   setProductThreshold,
   processPendingScheduledRestocks,
   getShopSubscription,
+  updateShopSubscription,
+  createAutomationLog,
 } from "../models/inventory.server";
 import { checkPlanLimitStatus } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
+
+  const url = new URL(request.url);
+  const chargeApproved = url.searchParams.get("charge_approved");
+  const planToActivate = url.searchParams.get("plan");
+
+  let activatedPlan = null;
+  if (chargeApproved === "true" && planToActivate) {
+    await updateShopSubscription(shop, planToActivate);
+    activatedPlan = planToActivate;
+    await createAutomationLog({
+      shop,
+      eventType: "BILLING_ACTIVATE",
+      productId: "N/A",
+      productTitle: `Subscription Upgraded to ${planToActivate}`,
+      variantTitle: "Shopify Billing Confirmed",
+      sku: "N/A",
+      quantity: 0,
+      actionTaken: `Merchant confirmed Shopify billing approval. Activated ${planToActivate} plan features.`,
+      status: "SUCCESS",
+    });
+  }
 
   await processPendingScheduledRestocks(admin, shop, { limit: 10 });
 
@@ -31,6 +54,8 @@ export const loader = async ({ request }) => {
     primaryLocationId: inventoryData.primaryLocationId,
     recentLogs,
     subscription,
+    chargeApproved: chargeApproved === "true",
+    activatedPlan,
   };
 };
 
@@ -81,7 +106,7 @@ export const action = async ({ request }) => {
 };
 
 export default function Dashboard() {
-  const { shop, items, settings, primaryLocationId, recentLogs, subscription } = useLoaderData();
+  const { shop, items, settings, primaryLocationId, recentLogs, subscription, chargeApproved, activatedPlan } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -91,6 +116,13 @@ export default function Dashboard() {
   const [newStockVal, setNewStockVal] = useState("");
   const [thresholdVal, setThresholdVal] = useState("");
   const [dismissChecklist, setDismissChecklist] = useState(false);
+  const [showSuccessBanner, setShowSuccessBanner] = useState(Boolean(chargeApproved && activatedPlan));
+
+  useEffect(() => {
+    if (chargeApproved && activatedPlan) {
+      shopify?.toast?.show?.(`Plan ${activatedPlan} successfully activated!`);
+    }
+  }, [chargeApproved, activatedPlan, shopify]);
 
   // Table Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -162,6 +194,74 @@ export default function Dashboard() {
 
   return (
     <div className="stock-container" style={{ paddingBottom: "40px" }}>
+      {/* Subscription Activation Success Banner */}
+      {showSuccessBanner && activatedPlan && (
+        <div
+          style={{
+            background: "linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%)",
+            border: "1px solid #6ee7b7",
+            borderRadius: "12px",
+            padding: "16px 20px",
+            marginBottom: "20px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            boxShadow: "0 4px 12px rgba(16, 185, 129, 0.12)",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div
+              style={{
+                width: "40px",
+                height: "40px",
+                borderRadius: "10px",
+                background: "#10b981",
+                color: "#ffffff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "20px",
+                fontWeight: "bold",
+                flexShrink: 0,
+              }}
+            >
+              ✓
+            </div>
+            <div>
+              <h3 style={{ margin: "0 0 2px 0", fontSize: "15px", color: "#065f46", fontWeight: "700" }}>
+                Subscription Plan Upgraded to {activatedPlan}!
+              </h3>
+              <p style={{ margin: 0, fontSize: "12px", color: "#047857" }}>
+                Shopify Billing charge confirmed. All features and volume limits for the <strong>{activatedPlan}</strong> plan are now fully active.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              const url = new URL(window.location.href);
+              url.searchParams.delete("charge_approved");
+              url.searchParams.delete("plan");
+              window.history.replaceState({}, "", url.toString());
+              setShowSuccessBanner(false);
+            }}
+            style={{
+              background: "#047857",
+              color: "#ffffff",
+              border: "none",
+              padding: "6px 14px",
+              fontSize: "12px",
+              fontWeight: "600",
+              borderRadius: "6px",
+              cursor: "pointer",
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Clean Top Header Bar */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "16px" }}>
         <div>

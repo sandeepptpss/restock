@@ -128,7 +128,7 @@ export const action = async ({ request }) => {
       process.env.SHOPIFY_APP_HANDLE ||
       "stockshield"
     ).trim();
-    const returnUrl = `https://${session.shop}/admin/apps/${appIdentifier}/app/settings?charge_approved=true&plan=${plan}`;
+    const returnUrl = `https://${session.shop}/admin/apps/${appIdentifier}/app?charge_approved=true&plan=${plan}`;
 
     // Test charges skip payment-method collection entirely, so the merchant never gets
     // the card step. Real charges need test: false AND a store that can actually be
