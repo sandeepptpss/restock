@@ -579,7 +579,7 @@ export default function AutomationRules() {
             disabled={isSubmitting}
             style={{ padding: "14px 32px", fontSize: "15px", background: "#0284c7" }}
           >
-            {isSubmitting ? "Updating Restock Settings..." : "Save & Apply Dynamic Restock Rules"}
+            {isSubmitting ? "Saving Settings..." : "Save & Apply Rules"}
           </button>
         </div>
       </fetcher.Form>
