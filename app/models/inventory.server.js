@@ -666,9 +666,8 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
 /**
  * Check if the Stock Control Theme App Embed block is enabled in the active main theme.
  */
-export async function checkThemeAppEmbedEnabled(admin, shop) {
+export async function checkThemeAppEmbedEnabled(admin) {
   if (!admin) return true;
-
   try {
     const res = await admin.graphql(
       `#graphql
@@ -746,7 +745,7 @@ export async function runStockoutAutomationScan(admin, shop) {
   await processPendingScheduledRestocks(admin, shop);
 
   // 2. Check if Theme App Embed is enabled in Shopify Theme Editor. If UNCHECKED, pause backend automation!
-  const isEmbedEnabled = await checkThemeAppEmbedEnabled(admin, shop);
+  const isEmbedEnabled = await checkThemeAppEmbedEnabled(admin);
 
   // 3. Fetch live inventory data from Shopify AFTER restocks have executed
   const { items, settings, primaryLocationId } = await fetchShopifyInventory(admin, shop);
@@ -772,7 +771,9 @@ export async function runStockoutAutomationScan(admin, shop) {
       try {
         await tryConnectDB();
         await AutomationLog.insertMany(logsToCreate);
-      } catch (err) { }
+      } catch (_err) {
+        // Ignore DB insert error
+      }
     }
 
     return {

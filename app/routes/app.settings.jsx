@@ -1,3 +1,4 @@
+/* global process */
 import { useState, useEffect } from "react";
 import { useLoaderData, useFetcher, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -118,7 +119,25 @@ export const action = async ({ request }) => {
 
     const priceMap = { GROWTH: 3.99, PRO: 15.99, ENTERPRISE: 29.99 };
     const price = priceMap[plan] || 15.99;
-    const returnUrl = `https://${session.shop}/admin/apps/${process.env.SHOPIFY_APP_NAME || "stock-control"}/app/settings?charge_approved=true&plan=${plan}`;
+    // Shopify admin resolves app deep links by client_id, so the API key is the only
+    // segment guaranteed to exist. Using the app name/handle 404s whenever the handle
+    // registered on the app differs from SHOPIFY_APP_NAME.
+    const appIdentifier = (
+      process.env.SHOPIFY_API_KEY ||
+      process.env.SHOPIFY_APP_NAME ||
+      process.env.SHOPIFY_APP_HANDLE ||
+      "stockshield"
+    ).trim();
+    const returnUrl = `https://${session.shop}/admin/apps/${appIdentifier}/app/settings?charge_approved=true&plan=${plan}`;
+
+    // Test charges skip payment-method collection entirely, so the merchant never gets
+    // the card step. Real charges need test: false AND a store that can actually be
+    // billed — development stores can't incur real charges regardless of this flag.
+    const isTestCharge = process.env.SHOPIFY_BILLING_TEST
+      ? process.env.SHOPIFY_BILLING_TEST === "true"
+      : process.env.NODE_ENV !== "production";
+
+    let billingError = null;
 
     try {
       const response = await admin.graphql(
@@ -134,7 +153,7 @@ export const action = async ({ request }) => {
           variables: {
             name: `StockShield ${plan} Plan`,
             returnUrl,
-            test: true,
+            test: isTestCharge,
             lineItems: [
               {
                 plan: {
@@ -149,18 +168,56 @@ export const action = async ({ request }) => {
         }
       );
       const json = await response.json();
-      const url = json.data?.appSubscriptionCreate?.confirmationUrl;
-      if (url) {
+      const result = json.data?.appSubscriptionCreate;
+      const userErrors = result?.userErrors || [];
+
+      if (userErrors.length) {
+        billingError = userErrors.map((e) => e.message).join("; ");
+      } else if (result?.confirmationUrl) {
         // Do NOT change DB plan yet! Return confirmationUrl so merchant approves via Shopify billing first.
-        return { success: true, confirmationUrl: url, plan };
+        // The loader activates the plan when Shopify redirects back to returnUrl.
+        return { success: true, confirmationUrl: result.confirmationUrl, plan };
+      } else {
+        billingError = "Shopify returned no confirmation URL for this charge.";
       }
     } catch (err) {
-      console.warn("Shopify Billing API call (falling back to direct DB activation in dev environment):", err.message);
+      billingError = err.message;
     }
 
-    // Direct activation fallback if billing API fails (e.g. dev environment without live app key)
-    const updatedSub = await updateShopSubscription(session.shop, plan);
-    return { success: true, subscription: updatedSub, plan };
+    // Past this point the charge was never created, so the plan must NOT be activated.
+    console.error(`[billing] ${session.shop} could not start ${plan}: ${billingError}`);
+
+    try {
+      await createAutomationLog({
+        shop: session.shop,
+        eventType: "BILLING_FAILED",
+        productId: "N/A",
+        productTitle: `Subscription to ${plan} could not be started`,
+        variantTitle: "Shopify Billing Rejected",
+        sku: "N/A",
+        quantity: 0,
+        actionTaken: `appSubscriptionCreate did not return a confirmation URL. Plan left unchanged. Reason: ${billingError}`,
+        status: "FAILED",
+      });
+    } catch (logErr) {
+      console.error("[billing] could not write BILLING_FAILED log:", logErr.message);
+    }
+
+    // Dev-only escape hatch for working on paid-plan features without a billable store.
+    // Requires BOTH a non-production build and an explicit opt-in, so it can never
+    // grant a paid plan for free in production.
+    if (process.env.NODE_ENV !== "production" && process.env.SHOPIFY_BILLING_DEV_BYPASS === "true") {
+      console.warn(`[billing] SHOPIFY_BILLING_DEV_BYPASS active — granting ${plan} to ${session.shop} with no charge.`);
+      const updatedSub = await updateShopSubscription(session.shop, plan);
+      return { success: true, subscription: updatedSub, plan, devBypass: true };
+    }
+
+    return {
+      success: false,
+      type: "billing_error",
+      plan,
+      error: `Could not start the ${plan} subscription: ${billingError}`,
+    };
   }
 
   // Only the fields this form actually renders are sent. The automation toggles
@@ -244,18 +301,29 @@ export default function Settings() {
   useEffect(() => {
     if (fetcher.data?.subscription?.plan) {
       setSelectedPlan(fetcher.data.subscription.plan);
+      if (fetcher.data.devBypass) {
+        shopify?.toast?.show?.(`${fetcher.data.plan} activated via dev bypass — no charge was made.`);
+      }
     }
-  }, [fetcher.data]);
+  }, [fetcher.data, shopify]);
+
+  useEffect(() => {
+    if (fetcher.data?.type === "billing_error") {
+      // The charge was never created, so keep showing whatever plan is actually active.
+      setSelectedPlan(currentPlan);
+      shopify?.toast?.show?.(fetcher.data.error, { isError: true });
+    }
+  }, [fetcher.data, currentPlan, shopify]);
 
   const isSubmitting = fetcher.state === "submitting";
 
   const handlePlanSelect = (planName) => {
-    setSelectedPlan(planName);
+    // No optimistic switch here: a paid plan is only really selected once Shopify has
+    // accepted the charge, so the card highlight follows the server response instead.
     fetcher.submit(
       { intent: "change_plan", plan: planName },
       { method: "post" }
     );
-    shopify?.toast?.show?.(`Switched to ${planName} Plan`);
   };
 
   const handleCopyEmail = () => {
