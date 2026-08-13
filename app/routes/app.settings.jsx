@@ -16,11 +16,41 @@ import {
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
+  const url = new URL(request.url);
+  const chargeApproved = url.searchParams.get("charge_approved");
+  const planToActivate = url.searchParams.get("plan");
+
+  let activatedPlan = null;
+  if (chargeApproved === "true" && planToActivate) {
+    await updateShopSubscription(session.shop, planToActivate);
+    activatedPlan = planToActivate;
+    await createAutomationLog({
+      shop: session.shop,
+      eventType: "BILLING_ACTIVATE",
+      productId: "N/A",
+      productTitle: `Subscription Upgraded to ${planToActivate}`,
+      variantTitle: "Shopify Billing Confirmed",
+      sku: "N/A",
+      quantity: 0,
+      actionTaken: `Merchant confirmed Shopify billing approval. Activated ${planToActivate} plan features.`,
+      status: "SUCCESS",
+    });
+  }
+
   const settings = await getInventorySettings(session.shop);
   const subscription = await getShopSubscription(session.shop);
   const supportTickets = await getSupportTickets(session.shop, 50);
+  const initialTab = url.searchParams.get("tab") || (chargeApproved ? "billing" : "general");
 
-  return { shop: session.shop, settings, subscription, supportTickets };
+  return {
+    shop: session.shop,
+    settings,
+    subscription,
+    supportTickets,
+    initialTab,
+    chargeApproved: chargeApproved === "true",
+    activatedPlan,
+  };
 };
 
 export const action = async ({ request }) => {
@@ -80,50 +110,57 @@ export const action = async ({ request }) => {
 
   if (intent === "change_plan") {
     const plan = formData.get("plan") || "GROWTH";
-    const updatedSub = await updateShopSubscription(session.shop, plan);
 
-    if (plan !== "FREE") {
-      const priceMap = { GROWTH: 3.99, PRO: 15.99, ENTERPRISE: 29.99 };
-      const price = priceMap[plan] || 15.99;
-      try {
-        const response = await admin.graphql(
-          `#graphql
-            mutation appSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean) {
-              appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test) {
-                userErrors { field message }
-                confirmationUrl
-              }
-            }
-          `,
-          {
-            variables: {
-              name: `StockShield ${plan} Plan`,
-              returnUrl: `https://${session.shop}/admin/apps/${process.env.SHOPIFY_APP_NAME || "stock-control"}/app/settings`,
-              test: true,
-              lineItems: [
-                {
-                  plan: {
-                    appRecurringPricingDetails: {
-                      price: { amount: price, currencyCode: "USD" },
-                      interval: "EVERY_30_DAYS",
-                    },
-                  },
-                },
-              ],
-            },
-          }
-        );
-        const json = await response.json();
-        const url = json.data?.appSubscriptionCreate?.confirmationUrl;
-        if (url) {
-          return { success: true, subscription: updatedSub, confirmationUrl: url };
-        }
-      } catch (err) {
-        console.warn("Shopify Billing API call (falling back to direct DB activation):", err.message);
-      }
+    if (plan === "FREE") {
+      const updatedSub = await updateShopSubscription(session.shop, "FREE");
+      return { success: true, subscription: updatedSub };
     }
 
-    return { success: true, subscription: updatedSub };
+    const priceMap = { GROWTH: 3.99, PRO: 15.99, ENTERPRISE: 29.99 };
+    const price = priceMap[plan] || 15.99;
+    const returnUrl = `https://${session.shop}/admin/apps/${process.env.SHOPIFY_APP_NAME || "stock-control"}/app/settings?charge_approved=true&plan=${plan}`;
+
+    try {
+      const response = await admin.graphql(
+        `#graphql
+          mutation appSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean) {
+            appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test) {
+              userErrors { field message }
+              confirmationUrl
+            }
+          }
+        `,
+        {
+          variables: {
+            name: `StockShield ${plan} Plan`,
+            returnUrl,
+            test: true,
+            lineItems: [
+              {
+                plan: {
+                  appRecurringPricingDetails: {
+                    price: { amount: price, currencyCode: "USD" },
+                    interval: "EVERY_30_DAYS",
+                  },
+                },
+              },
+            ],
+          },
+        }
+      );
+      const json = await response.json();
+      const url = json.data?.appSubscriptionCreate?.confirmationUrl;
+      if (url) {
+        // Do NOT change DB plan yet! Return confirmationUrl so merchant approves via Shopify billing first.
+        return { success: true, confirmationUrl: url, plan };
+      }
+    } catch (err) {
+      console.warn("Shopify Billing API call (falling back to direct DB activation in dev environment):", err.message);
+    }
+
+    // Direct activation fallback if billing API fails (e.g. dev environment without live app key)
+    const updatedSub = await updateShopSubscription(session.shop, plan);
+    return { success: true, subscription: updatedSub, plan };
   }
 
   const updated = await updateInventorySettings(session.shop, {
@@ -142,11 +179,11 @@ export const action = async ({ request }) => {
 };
 
 export default function Settings() {
-  const { shop, settings, subscription: loaderSub, supportTickets: initialTickets } = useLoaderData();
+  const { shop, settings, subscription: loaderSub, supportTickets: initialTickets, initialTab, chargeApproved, activatedPlan } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
-  const [activeTab, setActiveTab] = useState("general");
+  const [activeTab, setActiveTab] = useState(initialTab || "general");
 
   const currentPlan = fetcher.data?.subscription?.plan || loaderSub?.plan || "GROWTH";
   const [selectedPlan, setSelectedPlan] = useState(currentPlan);
@@ -164,6 +201,24 @@ export default function Settings() {
   const [replyStatus, setReplyStatus] = useState("RESOLVED");
 
   const isSendingSupport = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "send_support_request";
+
+  useEffect(() => {
+    if (chargeApproved && activatedPlan) {
+      shopify?.toast?.show?.(`Plan ${activatedPlan} successfully activated via Shopify Billing!`);
+    }
+  }, [chargeApproved, activatedPlan, shopify]);
+
+  useEffect(() => {
+    if (fetcher.data?.confirmationUrl) {
+      const confirmUrl = fetcher.data.confirmationUrl;
+      shopify?.toast?.show?.("Redirecting to Shopify Billing...");
+      if (window.top) {
+        window.top.location.href = confirmUrl;
+      } else {
+        window.location.href = confirmUrl;
+      }
+    }
+  }, [fetcher.data, shopify]);
 
   useEffect(() => {
     if (fetcher.data?.type === "support" && fetcher.data?.success) {

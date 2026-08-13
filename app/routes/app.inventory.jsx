@@ -3,23 +3,30 @@ import { useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { fetchShopifyInventory } from "../models/inventory.server";
+import { fetchShopifyInventory, getShopSubscription } from "../models/inventory.server";
+import { checkPlanLimitStatus } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const inventoryData = await fetchShopifyInventory(admin, session.shop);
+  const subscription = await getShopSubscription(session.shop);
   return {
     shop: session.shop,
     items: inventoryData.items,
     settings: inventoryData.settings,
+    subscription,
   };
 };
 
 export default function StockRadar() {
-  const { shop, items, settings } = useLoaderData();
+  const { shop, items, settings, subscription } = useLoaderData();
   const shopify = useAppBridge();
   const [filterRisk, setFilterRisk] = useState("ALL");
   const [searchTerm, setSearchTerm] = useState("");
+
+  const totalItems = items.length;
+  const planStatus = checkPlanLimitStatus(subscription?.plan, totalItems);
+  const { isBreached, promptMessage, targetUpgradePlan } = planStatus;
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -95,6 +102,67 @@ export default function StockRadar() {
           Export Reorder Sheet (CSV)
         </button>
       </div>
+
+      {/* Plan Limit Exceeded Banner */}
+      {isBreached && (
+        <div
+          style={{
+            background: "linear-gradient(135deg, #fef2f2 0%, #fff1f2 100%)",
+            border: "1px solid #fca5a5",
+            borderRadius: "12px",
+            padding: "16px 20px",
+            marginBottom: "20px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            boxShadow: "0 2px 8px rgba(220, 38, 38, 0.08)",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div
+              style={{
+                width: "40px",
+                height: "40px",
+                borderRadius: "10px",
+                background: "#fee2e2",
+                color: "#dc2626",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontWeight: "800",
+                fontSize: "18px",
+              }}
+            >
+              ⚠️
+            </div>
+            <div>
+              <h3 style={{ margin: "0 0 2px 0", fontSize: "15px", color: "#991b1b", fontWeight: "700" }}>
+                Product Limit Exceeded
+              </h3>
+              <p style={{ margin: 0, fontSize: "13px", color: "#7f1d1d" }}>
+                {promptMessage} Existing protected items remain active while you upgrade.
+              </p>
+            </div>
+          </div>
+          <a
+            href="/app/settings?tab=billing"
+            className="btn-primary"
+            style={{
+              background: "#dc2626",
+              color: "#ffffff",
+              textDecoration: "none",
+              padding: "8px 18px",
+              fontSize: "13px",
+              fontWeight: "700",
+              borderRadius: "8px",
+            }}
+          >
+            Upgrade to {targetUpgradePlan} &rarr;
+          </a>
+        </div>
+      )}
 
       {/* Radar KPI Cards */}
       <div className="kpi-grid">

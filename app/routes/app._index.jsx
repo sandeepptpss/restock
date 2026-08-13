@@ -10,7 +10,9 @@ import {
   updateInventoryQuantity,
   setProductThreshold,
   processPendingScheduledRestocks,
+  getShopSubscription,
 } from "../models/inventory.server";
+import { checkPlanLimitStatus } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -20,6 +22,7 @@ export const loader = async ({ request }) => {
 
   const inventoryData = await fetchShopifyInventory(admin, shop);
   const recentLogs = await getAutomationLogs(shop, 10);
+  const subscription = await getShopSubscription(shop);
 
   return {
     shop,
@@ -27,6 +30,7 @@ export const loader = async ({ request }) => {
     settings: inventoryData.settings,
     primaryLocationId: inventoryData.primaryLocationId,
     recentLogs,
+    subscription,
   };
 };
 
@@ -77,7 +81,7 @@ export const action = async ({ request }) => {
 };
 
 export default function Dashboard() {
-  const { shop, items, settings, primaryLocationId, recentLogs } = useLoaderData();
+  const { shop, items, settings, primaryLocationId, recentLogs, subscription } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -110,6 +114,10 @@ export default function Dashboard() {
   const criticalItems = items.filter((i) => i.inventoryQuantity <= 0);
   const warningItems = items.filter((i) => i.inventoryQuantity > 0 && i.inventoryQuantity <= i.threshold);
   const healthyItems = items.filter((i) => i.inventoryQuantity > i.threshold);
+
+  // Plan limit enforcement checks
+  const planStatus = checkPlanLimitStatus(subscription?.plan, totalItems);
+  const { isBreached, promptMessage, targetUpgradePlan } = planStatus;
 
   // Store Protection Health Score
   const healthPercentage = totalItems > 0 ? Math.round(((healthyItems.length + warningItems.length) / totalItems) * 100) : 100;
@@ -184,6 +192,67 @@ export default function Dashboard() {
           </fetcher.Form>
         </div>
       </div>
+
+      {/* Plan Limit Exceeded Pro Upgrade Banner */}
+      {isBreached && (
+        <div
+          style={{
+            background: "linear-gradient(135deg, #fef2f2 0%, #fff1f2 100%)",
+            border: "1px solid #fca5a5",
+            borderRadius: "12px",
+            padding: "16px 20px",
+            marginBottom: "20px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            boxShadow: "0 2px 8px rgba(220, 38, 38, 0.08)",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div
+              style={{
+                width: "40px",
+                height: "40px",
+                borderRadius: "10px",
+                background: "#fee2e2",
+                color: "#dc2626",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontWeight: "800",
+                fontSize: "18px",
+              }}
+            >
+              ⚠️
+            </div>
+            <div>
+              <h3 style={{ margin: "0 0 2px 0", fontSize: "15px", color: "#991b1b", fontWeight: "700" }}>
+                Product Limit Exceeded
+              </h3>
+              <p style={{ margin: 0, fontSize: "13px", color: "#7f1d1d" }}>
+                {promptMessage} Existing protected items remain active while you upgrade.
+              </p>
+            </div>
+          </div>
+          <a
+            href="/app/settings?tab=billing"
+            className="btn-primary"
+            style={{
+              background: "#dc2626",
+              color: "#ffffff",
+              textDecoration: "none",
+              padding: "8px 18px",
+              fontSize: "13px",
+              fontWeight: "700",
+              borderRadius: "8px",
+            }}
+          >
+            Upgrade to {targetUpgradePlan} &rarr;
+          </a>
+        </div>
+      )}
 
       {/* Critical Alert Banner (Only when critical items exist) */}
       {criticalItems.length > 0 && (

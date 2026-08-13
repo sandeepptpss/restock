@@ -1907,6 +1907,8 @@ export async function getShopSubscription(shop) {
   }
 }
 
+export { PLAN_LIMITS, checkPlanLimitStatus } from "../utils/planLimits";
+
 /**
  * Update shop subscription plan
  */
