@@ -1,6 +1,6 @@
 {% comment %}
   Smart Stock Control Theme App Embed Block
-  Injects real-time stock badges and inventory alerts onto Shopify product pages
+  Injects real-time stock badges and auto-hides sold-out products from collection grids
 {% endcomment %}
 {% if product %}
   <script>
@@ -35,6 +35,64 @@
   </style>
 {% endif %}
 
+<script>
+  (function() {
+    {% if block.settings.hide_sold_out_collections == true %}
+    function autoHideSoldOutCollectionCards() {
+      // Do not hide main product display on single product pages
+      var path = window.location.pathname || '';
+      if (path.indexOf('/products/') === 0 && path.indexOf('/collections/') === -1) {
+        return;
+      }
+
+      var cardSelectors = [
+        '.grid__item',
+        '.product-grid-item',
+        '.card-wrapper',
+        '.product-card',
+        '.product-item',
+        '.grid-item',
+        '.card',
+        'li.grid__item',
+        '[data-product-id]'
+      ];
+
+      cardSelectors.forEach(function(selector) {
+        var cards = document.querySelectorAll(selector);
+        cards.forEach(function(card) {
+          if (card.getAttribute('data-stockshield-checked') === 'true') return;
+
+          // Check if card contains a Sold out indicator
+          var badge = card.querySelector('.badge, .badge--bottom-left, .price--sold-out, .sold-out, .badge--sold-out, .card__badge');
+          var text = badge ? badge.textContent : card.textContent;
+
+          if (badge && /sold\s*out/i.test(badge.textContent)) {
+            card.style.setProperty('display', 'none', 'important');
+            card.setAttribute('data-stockshield-checked', 'true');
+          } else if (/sold\s*out/i.test(text) && (card.querySelector('.price--sold-out') || card.querySelector('.badge'))) {
+            card.style.setProperty('display', 'none', 'important');
+            card.setAttribute('data-stockshield-checked', 'true');
+          }
+        });
+      });
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', autoHideSoldOutCollectionCards);
+    } else {
+      autoHideSoldOutCollectionCards();
+    }
+
+    try {
+      var observer = new MutationObserver(function() {
+        autoHideSoldOutCollectionCards();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    } catch(e) {}
+    {% endif %}
+  })();
+</script>
+
 {% schema %}
 {
   "name": "Stock Control Embed",
@@ -51,6 +109,12 @@
       "id": "low_stock_text",
       "label": "Low Stock Badge Text",
       "default": "🔥 Only a few items left in stock!"
+    },
+    {
+      "type": "checkbox",
+      "id": "hide_sold_out_collections",
+      "label": "Auto-Hide Sold Out Items from Collection & Search Grids",
+      "default": false
     }
   ]
 }

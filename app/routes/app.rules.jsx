@@ -31,7 +31,7 @@ export const action = async ({ request }) => {
 
   const data = {
     defaultLowStockLimit: formData.get("defaultLowStockLimit"),
-    visibilityMode: formData.get("visibilityMode") || "UNLISTED",
+    visibilityMode: formData.get("visibilityMode") || "ACTIVE_HIDDEN",
     variantStrategy: formData.get("variantStrategy") || "HIDE_ALL_OOS",
     restockDelayValue: formData.get("restockDelayValue"),
     restockDelayUnit: formData.get("restockDelayUnit") || "IMMEDIATE",
@@ -51,7 +51,7 @@ export const action = async ({ request }) => {
   };
 
   const updated = await updateInventorySettings(session.shop, data);
-  
+
   await runStockoutAutomationScan(admin, session.shop);
 
   return { success: true, settings: updated };
@@ -67,8 +67,10 @@ export default function AutomationRules() {
 
   const settings = fetcher.data?.settings || loaderSettings;
 
+  const normalizeVisibility = (mode) => (mode === "UNLISTED" ? "ACTIVE_HIDDEN" : mode || "ACTIVE_HIDDEN");
+
   const [activeTab, setActiveTab] = useState("FLOW_ENGINE");
-  const [selectedVisibility, setSelectedVisibility] = useState(settings.visibilityMode || "UNLISTED");
+  const [selectedVisibility, setSelectedVisibility] = useState(normalizeVisibility(settings.visibilityMode));
   const [selectedVariantStrat, setSelectedVariantStrat] = useState(settings.variantStrategy || "HIDE_ALL_OOS");
   const [restockDelayUnit, setRestockDelayUnit] = useState(settings.restockDelayUnit || "IMMEDIATE");
   const [autoFillEnabled, setAutoFillEnabled] = useState(Boolean(settings.enableAutoFill));
@@ -77,7 +79,7 @@ export default function AutomationRules() {
 
   useEffect(() => {
     if (settings) {
-      setSelectedVisibility(settings.visibilityMode || "UNLISTED");
+      setSelectedVisibility(normalizeVisibility(settings.visibilityMode));
       setSelectedVariantStrat(settings.variantStrategy || "HIDE_ALL_OOS");
       setRestockDelayUnit(settings.restockDelayUnit || "IMMEDIATE");
       setAutoFillEnabled(Boolean(settings.enableAutoFill));
@@ -489,8 +491,8 @@ export default function AutomationRules() {
 
               <div className="form-group" style={{ opacity: autoHideEnabled ? 1 : 0.6 }}>
                 <label className="form-label" htmlFor="field-visibilityMode">Visibility Mode Action</label>
+                <input type="hidden" name="visibilityMode" value={selectedVisibility} />
                 <select id="field-visibilityMode"
-                  name="visibilityMode"
                   className="form-input"
                   value={selectedVisibility}
                   disabled={!autoHideEnabled}
@@ -502,34 +504,34 @@ export default function AutomationRules() {
                   }}
                   style={{ background: "#ffffff", fontWeight: "600" }}
                 >
-                  <option value="UNLISTED">Unlisted (Storefront Direct Link Access Only - Recommended)</option>
-                  <option value="DRAFT">Set Status to DRAFT (Hide from Storefront, Collections &amp; Search)</option>
-                  <option value="TAG_ONLY">Tag Only (Keep Product Visible, Let Theme Show Badge)</option>
-                  <option value="UNPUBLISH_CHANNEL">Unpublish from Online Store Sales Channel</option>
+                  <option value="ACTIVE_HIDDEN">Hide from Catalog &amp; Search (Keep Product Link Working - Recommended)</option>
+                  <option value="DRAFT">Set Status to Draft (Completely Hide Product)</option>
+                  <option value="TAG_ONLY">Keep Product Visible (Apply Out-of-Stock Tag Only)</option>
+                  <option value="UNPUBLISH_CHANNEL">Unpublish from Online Store Channel</option>
                 </select>
               </div>
 
               {/* Dynamic Visibility Preview Badge */}
               <div style={{
-                background: selectedVisibility === "UNLISTED" ? "#eff6ff" : selectedVisibility === "DRAFT" ? "#fef2f2" : "#f8fafc",
-                border: `1px solid ${selectedVisibility === "UNLISTED" ? "#bfdbfe" : selectedVisibility === "DRAFT" ? "#fecaca" : "#e2e8f0"}`,
+                background: (selectedVisibility === "ACTIVE_HIDDEN" || selectedVisibility === "UNLISTED") ? "#eff6ff" : selectedVisibility === "DRAFT" ? "#fef2f2" : "#f8fafc",
+                border: `1px solid ${(selectedVisibility === "ACTIVE_HIDDEN" || selectedVisibility === "UNLISTED") ? "#bfdbfe" : selectedVisibility === "DRAFT" ? "#fecaca" : "#e2e8f0"}`,
                 borderRadius: "8px",
                 padding: "12px",
                 marginTop: "12px",
                 fontSize: "12px",
                 color: "#1e293b"
               }}>
-                {selectedVisibility === "UNLISTED" && (
-                  <span><strong>Unlisted Mode (Best for SEO &amp; Back-in-Stock):</strong> Hides product from collection pages &amp; site search, but direct URL remains active for customer restock requests.</span>
+                {(selectedVisibility === "ACTIVE_HIDDEN" || selectedVisibility === "UNLISTED") && (
+                  <span><strong>Hide from Catalog &amp; Search (Recommended):</strong> Hides product from collection pages and site search, but keeps the product page URL working so customers can request back-in-stock notifications.</span>
                 )}
                 {selectedVisibility === "DRAFT" && (
-                  <span><strong>Draft Mode:</strong> Product is completely unpublished from storefront, search, and direct links (direct URL returns 404 page).</span>
+                  <span><strong>Draft Mode:</strong> Product status is changed to Draft (completely hides product from storefront, search, and direct links).</span>
                 )}
                 {selectedVisibility === "TAG_ONLY" && (
-                  <span><strong>Tag Only Mode:</strong> Product stays Active. App only applies the out-of-stock tag so your theme can show a sold-out badge.</span>
+                  <span><strong>Tag Only Mode:</strong> Product stays visible on your store. The app only applies the out-of-stock tag so your theme can show a sold-out badge.</span>
                 )}
                 {selectedVisibility === "UNPUBLISH_CHANNEL" && (
-                  <span><strong>Unpublish Channel:</strong> Unpublishes product from the Online Store sales channel while keeping product status intact.</span>
+                  <span><strong>Unpublish Channel Mode:</strong> Unpublishes product from the Online Store sales channel while keeping product status intact.</span>
                 )}
               </div>
 

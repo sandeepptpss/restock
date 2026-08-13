@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { timingSafeEqual } from "node:crypto";
 import { env } from "node:process";
-import { processDueScheduledRestocks } from "../models/inventory.server";
+import { processDueScheduledRestocks, reconcileStockoutsForAllShops } from "../models/inventory.server";
 
 /**
  * Durable scheduled-restock runner.
@@ -46,8 +46,20 @@ export const action = async ({ request }) => {
 
   try {
     const result = await processDueScheduledRestocks();
-    console.log("[Cron] Scheduled restock run complete:", result);
-    return Response.json({ ok: true, ...result });
+
+    // Then catch up on anything the webhook never delivered — a stockout that
+    // happened while the app was down stays unapplied until a scan sees it.
+    // ?reconcile=0 runs the due jobs only.
+    const url = new URL(request.url);
+    const reconcile = url.searchParams.get("reconcile") !== "0";
+    const reconciled = reconcile ? await reconcileStockoutsForAllShops() : null;
+
+    console.log("[Cron] Scheduled restock run complete:", result, reconciled ? `reconciled ${reconciled.shops} shop(s)` : "");
+    return Response.json({
+      ok: true,
+      ...result,
+      reconciled: reconciled ? { shops: reconciled.shops, scanned: reconciled.scanned } : null,
+    });
   } catch (err) {
     console.error("[Cron] Scheduled restock run failed:", err);
     return Response.json({ ok: false, error: err.message }, { status: 500 });

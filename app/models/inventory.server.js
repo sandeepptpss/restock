@@ -59,7 +59,7 @@ const DEFAULT_SETTINGS = (shop) => ({
   // UNLISTED keeps the product out of collections, storefront search, predictive
   // search, recommendations and the sitemap while leaving its URL reachable, so
   // the "Notify me when back in stock" block still has a page to render on.
-  visibilityMode: "UNLISTED",
+  visibilityMode: "ACTIVE_HIDDEN",
   variantStrategy: "HIDE_ALL_OOS",
   locationStrategy: "ALL_LOCATIONS",
   restockDelayValue: 0,
@@ -497,6 +497,12 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
             handle
             status
             tags
+            # The trace left by the UNLISTED/ACTIVE_HIDDEN visibility modes, which
+            # keep the product ACTIVE. Without it a restock cannot tell whether the
+            # app hid the product from the catalogue.
+            seoHidden: metafield(namespace: "seo", key: "hidden") {
+              value
+            }
             featuredImage {
               url
               altText
@@ -630,6 +636,7 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
         productTitle: prod.title,
         productHandle: prod.handle,
         productStatus: prod.status,
+        productSeoHidden: prod.seoHidden?.value ?? null,
         productTags: prod.tags || [],
         imageUrl: prod.featuredImage?.url || null,
         variantId: v.id,
@@ -657,19 +664,127 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
 }
 
 /**
+ * Check if the Stock Control Theme App Embed block is enabled in the active main theme.
+ */
+export async function checkThemeAppEmbedEnabled(admin, shop) {
+  if (!admin) return true;
+
+  try {
+    const res = await admin.graphql(
+      `#graphql
+        query checkThemeEmbedStatus {
+          themes(first: 5, roles: [MAIN]) {
+            edges {
+              node {
+                id
+                name
+                role
+                files(filenames: ["config/settings_data.json"]) {
+                  nodes {
+                    body {
+                      ... on OnlineStoreConfigFileBodyText {
+                        content
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `
+    );
+
+    const json = await res.json();
+    const mainTheme = json.data?.themes?.edges?.[0]?.node;
+    const fileContent = mainTheme?.files?.nodes?.[0]?.body?.content;
+
+    if (fileContent) {
+      const parsed = JSON.parse(fileContent);
+      const blocks = parsed.current?.blocks || parsed.blocks || {};
+
+      let hasAppEmbedBlock = false;
+      let appEmbedDisabled = false;
+
+      for (const blockId of Object.keys(blocks)) {
+        const block = blocks[blockId];
+        const blockType = String(block.type || "").toLowerCase();
+
+        // Check for our app embed blocks (stock_badge or notify_me or extension ID)
+        if (
+          blockType.includes("stock_badge") ||
+          blockType.includes("stock_control") ||
+          blockType.includes("stockshield") ||
+          blockType.includes("9db7c086")
+        ) {
+          hasAppEmbedBlock = true;
+          if (block.disabled === true) {
+            appEmbedDisabled = true;
+          } else {
+            // Found an active enabled embed block!
+            return true;
+          }
+        }
+      }
+
+      if (hasAppEmbedBlock && appEmbedDisabled) {
+        return false;
+      }
+    }
+  } catch (err) {
+    console.warn("[checkThemeAppEmbedEnabled] GraphQL check error:", err.message);
+  }
+
+  return true;
+}
+
+/**
  * Execute Stockout & Low-Stock Automation Scan with Variant Handling Strategy
  */
 export async function runStockoutAutomationScan(admin, shop) {
   // 1. First process any pending scheduled restocks due for execution BEFORE fetching catalog
   await processPendingScheduledRestocks(admin, shop);
 
-  // 2. Fetch live inventory data from Shopify AFTER restocks have executed
+  // 2. Check if Theme App Embed is enabled in Shopify Theme Editor. If UNCHECKED, pause backend automation!
+  const isEmbedEnabled = await checkThemeAppEmbedEnabled(admin, shop);
+
+  // 3. Fetch live inventory data from Shopify AFTER restocks have executed
   const { items, settings, primaryLocationId } = await fetchShopifyInventory(admin, shop);
   const logsToCreate = [];
   let taggedCount = 0;
   let hiddenCount = 0;
   let publishedCount = 0;
   let alertsCount = 0;
+
+  if (!isEmbedEnabled) {
+    console.log(`[runStockoutAutomationScan] Theme App Embed is UNCHECKED in Shopify Theme Editor for ${shop}. Pausing auto-hiding & auto-tagging.`);
+    logsToCreate.push({
+      shop,
+      eventType: "AUTOMATION_SKIPPED",
+      productTitle: "Theme App Embed Disabled",
+      quantity: items.length,
+      actionTaken: "Theme App Embed is UNCHECKED in Shopify Theme Editor. Automated product hiding & tagging is PAUSED.",
+      status: "WARNING",
+      details: "Enable 'Stock Control Embed' in Shopify Theme Editor to activate automation.",
+    });
+
+    if (isDbConfigured()) {
+      try {
+        await tryConnectDB();
+        await AutomationLog.insertMany(logsToCreate);
+      } catch (err) { }
+    }
+
+    return {
+      scanned: items.length,
+      taggedCount: 0,
+      hiddenCount: 0,
+      publishedCount: 0,
+      alertsCount: 0,
+      embedDisabled: true,
+      logsCreated: logsToCreate.length,
+    };
+  }
 
   // Group items by product to enforce Variant Strategy (e.g., HIDE_ALL_OOS)
   const productGroupMap = new Map();
@@ -698,6 +813,10 @@ export async function runStockoutAutomationScan(admin, shop) {
     if (isProductStockout) {
       alertsCount++;
       const tagToApply = settings.outOfStockTag || "out-of-stock";
+
+      // An unhide still waiting out its delay would bring this product back while
+      // it is out of stock again.
+      await cancelPendingRestocks(shop, productId, { jobType: "UNHIDE", reason: "re-emptied" });
 
       // 1. Execute tagsAdd mutation if Auto-Tag is enabled
       if (settings.enableAutoTag !== false) {
@@ -790,6 +909,46 @@ export async function runStockoutAutomationScan(admin, shop) {
     else if (productItems.some((i) => i.inventoryQuantity > 0)) {
       await cancelPendingRestocks(shop, productId);
 
+      // Same hold-down as the webhook: with a Restock Delay configured, the untag
+      // and the visibility restore belong to a scheduled UNHIDE job, not to this
+      // pass. Without one they run inline, exactly as before.
+      const unhideDelayMs = calculateDelayMs(settings.restockDelayValue, settings.restockDelayUnit);
+      const carriesOutOfStockTagNow =
+        settings.enableAutoTag !== false && (firstItem.productTags || []).includes(settings.outOfStockTag);
+      const hiddenByApp = needsVisibilityRestore(
+        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden },
+        settings.visibilityMode
+      );
+
+      if (unhideDelayMs > 0 && (carriesOutOfStockTagNow || (settings.enableAutoPublish && hiddenByApp))) {
+        const job = await scheduleProductRestock(admin, {
+          shop,
+          productId,
+          variantId: firstItem.variantId,
+          inventoryItemId: firstItem.inventoryItemId,
+          locationId: primaryLocationId,
+          productTitle: firstItem.productTitle,
+          variantTitle: firstItem.variantTitle,
+          sku: firstItem.sku,
+          jobType: "UNHIDE",
+        });
+
+        logsToCreate.push({
+          shop,
+          eventType: "SCHEDULED_UNHIDE",
+          productId,
+          productTitle: firstItem.productTitle,
+          variantTitle: `${productItems.length} Variants`,
+          sku: firstItem.sku,
+          quantity: totalProdInventory,
+          actionTaken: `Restocked — auto-unhide scheduled in ${settings.restockDelayValue} ${settings.restockDelayUnit}`,
+          status: job ? "SUCCESS" : "FAILED",
+          details: job ? null : "Could not persist the scheduled unhide job",
+        });
+
+        continue;
+      }
+
       if (settings.enableAutoTag && firstItem.productTags.includes(settings.outOfStockTag)) {
         try {
           await admin.graphql(
@@ -815,10 +974,14 @@ export async function runStockoutAutomationScan(admin, shop) {
         }
       }
 
-      // Reverse the visibility action for the configured mode. DRAFT/UNLISTED only
-      // need restoring when the product is actually in that state; the channel mode
-      // has no status to inspect, so it is always re-published.
-      const needsRestore = needsVisibilityRestore(firstItem.productStatus, settings.visibilityMode);
+      // Reverse the visibility action for the configured mode. DRAFT only needs
+      // restoring when the product is actually drafted and UNLISTED/ACTIVE_HIDDEN
+      // only when the seo.hidden metafield is still set; the channel mode has no
+      // status to inspect, so it is always re-published.
+      const needsRestore = needsVisibilityRestore(
+        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden },
+        settings.visibilityMode
+      );
 
       if (settings.enableAutoPublish && needsRestore) {
         const restored = await restoreProductVisibility(admin, {
@@ -856,7 +1019,10 @@ export async function runStockoutAutomationScan(admin, shop) {
     // removed, whose `productTags` snapshot is now stale.
     if (!isProductStockout && !outOfStockTagRemoved && settings.enableAutoHide !== false) {
       const carriesOutOfStockTag = (firstItem.productTags || []).includes(settings.outOfStockTag);
-      const alreadyHidden = isHiddenForMode(firstItem.productStatus, settings.visibilityMode);
+      const alreadyHidden = isHiddenForMode(
+        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden },
+        settings.visibilityMode
+      );
 
       if (carriesOutOfStockTag && !alreadyHidden) {
         const enforced = await applyStockoutVisibility(admin, {
@@ -1321,17 +1487,55 @@ export function evaluateStockoutCondition(quantities, strategy) {
 }
 
 /**
+ * Normalise the two shapes a caller can describe a product with: the product
+ * itself (`{ status, seoHidden }`) or just its status string.
+ *
+ * `seoHidden` is the raw value of the seo.hidden metafield — `null` when the
+ * metafield has never been set, `undefined` when the caller could not read it.
+ */
+function readVisibilityState(product) {
+  if (product == null || typeof product === "string") {
+    return { status: product || "", seoHidden: undefined };
+  }
+  return {
+    status: product.status || product.productStatus || "",
+    seoHidden: product.seoHidden !== undefined ? product.seoHidden : product.productSeoHidden,
+  };
+}
+
+/**
+ * Whether the seo.hidden metafield marks a product as hidden. The metafield is
+ * written as "1" on hide and "0" on restore, so anything empty, "0" or absent
+ * means the product is listed.
+ */
+function isSeoHiddenValue(value) {
+  if (value == null) return false;
+  if (typeof value === "boolean") return value;
+  const normalised = String(value).trim().toLowerCase();
+  return normalised !== "" && normalised !== "0" && normalised !== "false";
+}
+
+/**
  * Whether a product still needs its visibility restored, given the mode that
  * would have hidden it. Used to keep a restock from re-issuing an ACTIVE update
  * (and a duplicate log line) against a product that is already visible.
+ *
+ * Takes the product (`{ status, seoHidden }`); a bare status string still works
+ * for the status-based modes.
  */
-export function needsVisibilityRestore(productStatus, visibilityMode) {
+export function needsVisibilityRestore(product, visibilityMode) {
   const mode = visibilityMode || "DRAFT";
-  if (mode === "TAG_ONLY") return false;
-  // The channel mode has no product status to inspect, so it is always re-published.
+  const { status, seoHidden } = readVisibilityState(product);
+
+  // If a product is currently drafted or hidden via seo.hidden = 1, it needs visibility restore to be visible on storefront
+  if (status === "DRAFT" || isSeoHiddenValue(seoHidden)) return true;
   if (mode === "UNPUBLISH_CHANNEL") return true;
-  if (mode === "UNLISTED") return productStatus === "UNLISTED";
-  return productStatus === "DRAFT";
+
+  if (mode === "TAG_ONLY") return false;
+  if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
+    return seoHidden === undefined ? true : isSeoHiddenValue(seoHidden);
+  }
+  return status === "DRAFT";
 }
 
 /**
@@ -1342,11 +1546,13 @@ export function needsVisibilityRestore(productStatus, visibilityMode) {
  * reported as not hidden and the enforcement pass simply re-asserts the
  * unpublish, which is a no-op when it is already unpublished.
  */
-export function isHiddenForMode(productStatus, visibilityMode) {
+export function isHiddenForMode(product, visibilityMode) {
   const mode = visibilityMode || "DRAFT";
+  const { status, seoHidden } = readVisibilityState(product);
+
   if (mode === "TAG_ONLY") return false;
-  if (mode === "UNLISTED") return productStatus === "UNLISTED";
-  if (mode === "DRAFT") return productStatus === "DRAFT";
+  if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") return isSeoHiddenValue(seoHidden);
+  if (mode === "DRAFT") return status === "DRAFT";
   return false;
 }
 
@@ -1357,16 +1563,22 @@ export function isHiddenForMode(productStatus, visibilityMode) {
  * the product is buyable again, firing one would auto-fill over the merchant's
  * own quantity and emit a second RESTOCK/ACTIVE action for the same recovery.
  */
-export async function cancelPendingRestocks(shop, productId) {
+export async function cancelPendingRestocks(shop, productId, { jobType = "AUTO_FILL", reason = "restocked" } = {}) {
   if (!isDbConfigured() || !shop || !productId) return 0;
   try {
     await tryConnectDB();
-    const { modifiedCount: count } = await ScheduledRestock.updateMany(
-      { shop, productId: ensureGid(productId, "Product"), status: "PENDING" },
-      { $set: { status: "CANCELLED" } }
-    );
+    const filter = {
+      shop,
+      productId: ensureGid(productId, "Product"),
+      status: "PENDING",
+    };
+    // Jobs written before jobType existed are all auto-fills.
+    if (jobType === "AUTO_FILL") filter.jobType = { $in: ["AUTO_FILL", null] };
+    else if (jobType) filter.jobType = jobType;
+
+    const { modifiedCount: count } = await ScheduledRestock.updateMany(filter, { $set: { status: "CANCELLED" } });
     if (count > 0) {
-      console.log(`[ScheduledRestock] Cancelled ${count} pending job(s) for restocked product ${productId}`);
+      console.log(`[ScheduledRestock] Cancelled ${count} pending ${jobType || "any"} job(s) for ${reason} product ${productId}`);
     }
     return count;
   } catch (err) {
@@ -1426,7 +1638,50 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
   }
 
   if (mode === "TAG_ONLY") {
-    return { mode, action: "Tag only — product left visible", changed: false, errors };
+    try {
+      const pubId = await getOnlineStorePublicationId(admin, shop);
+      if (pubId) {
+        await admin.graphql(
+          `#graphql
+            mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
+              publishablePublish(id: $id, input: $input) { userErrors { message } }
+            }
+          `,
+          { variables: { id, input: [{ publicationId: pubId }] } }
+        );
+      }
+      const res = await admin.graphql(
+        `#graphql
+          mutation restoreTagOnlyVisible($id: ID!, $metafields: [MetafieldsSetInput!]!, $input: ProductInput!) {
+            metafieldsSet(metafields: $metafields) { userErrors { message } }
+            productUpdate(input: $input) { product { id status } userErrors { message } }
+          }
+        `,
+        {
+          variables: {
+            id,
+            metafields: [{ ownerId: id, namespace: "seo", key: "hidden", value: "0", type: "number_integer" }],
+            input: { id, status: "ACTIVE" },
+          },
+        }
+      );
+      const json = await res.json();
+      const errs = [
+        ...collectGraphqlErrors(json, "metafieldsSet"),
+        ...collectGraphqlErrors(json, "productUpdate"),
+      ];
+      if (errs.length > 0) errors.push(...errs);
+
+      return {
+        mode,
+        action: "Tag only — product kept ACTIVE and visible on storefront",
+        changed: errs.length === 0,
+        errors,
+      };
+    } catch (err) {
+      errors.push(err.message);
+      return { mode, action: "Tag only — product left visible", changed: false, errors };
+    }
   }
 
   if (mode === "UNPUBLISH_CHANNEL") {
@@ -1457,7 +1712,60 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
     }
   }
 
-  const status = mode === "UNLISTED" ? "UNLISTED" : "DRAFT";
+  if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
+    try {
+      const res = await admin.graphql(
+        `#graphql
+          mutation setUnlistedSeoMetafield($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+              metafields { id key value }
+              userErrors { field message }
+            }
+          }
+        `,
+        {
+          variables: {
+            metafields: [
+              {
+                ownerId: id,
+                namespace: "seo",
+                key: "hidden",
+                value: "1",
+                type: "number_integer",
+              },
+            ],
+          },
+        }
+      );
+      const json = await res.json();
+      const errs = collectGraphqlErrors(json, "metafieldsSet");
+      if (errs.length > 0) errors.push(...errs);
+
+      // Ensure product status remains ACTIVE so direct URLs are 100% accessible
+      await admin.graphql(
+        `#graphql
+          mutation productUpdateActive($input: ProductInput!) {
+            productUpdate(input: $input) {
+              product { id status }
+              userErrors { field message }
+            }
+          }
+        `,
+        { variables: { input: { id, status: "ACTIVE" } } }
+      );
+
+      return {
+        mode,
+        action: "Set to Unlisted Active (Product ACTIVE, Hidden from Storefront & Search, Direct URL Accessible)",
+        changed: errors.length === 0,
+        errors,
+      };
+    } catch (err) {
+      errors.push(err.message);
+      return { mode, action: "Set to Unlisted Active", changed: false, errors };
+    }
+  }
+
   try {
     const res = await admin.graphql(
       `#graphql
@@ -1468,15 +1776,15 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
           }
         }
       `,
-      { variables: { input: { id, status } } }
+      { variables: { input: { id, status: "DRAFT" } } }
     );
     const json = await res.json();
     const errs = collectGraphqlErrors(json, "productUpdate");
     if (errs.length > 0) errors.push(...errs);
-    return { mode, action: `Set status to ${status}`, changed: errors.length === 0, errors };
+    return { mode, action: "Set status to DRAFT", changed: errors.length === 0, errors };
   } catch (err) {
     errors.push(err.message);
-    return { mode, action: `Set status to ${status}`, changed: false, errors };
+    return { mode, action: "Set status to DRAFT", changed: false, errors };
   }
 }
 
@@ -1495,7 +1803,50 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
   }
 
   if (mode === "TAG_ONLY") {
-    return { mode, action: "Tag only — no status change needed", changed: false, errors };
+    try {
+      const pubId = await getOnlineStorePublicationId(admin, shop);
+      if (pubId) {
+        await admin.graphql(
+          `#graphql
+            mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
+              publishablePublish(id: $id, input: $input) { userErrors { message } }
+            }
+          `,
+          { variables: { id, input: [{ publicationId: pubId }] } }
+        );
+      }
+      const res = await admin.graphql(
+        `#graphql
+          mutation restoreTagOnlyVisible($id: ID!, $metafields: [MetafieldsSetInput!]!, $input: ProductInput!) {
+            metafieldsSet(metafields: $metafields) { userErrors { message } }
+            productUpdate(input: $input) { product { id status } userErrors { message } }
+          }
+        `,
+        {
+          variables: {
+            id,
+            metafields: [{ ownerId: id, namespace: "seo", key: "hidden", value: "0", type: "number_integer" }],
+            input: { id, status: "ACTIVE" },
+          },
+        }
+      );
+      const json = await res.json();
+      const errs = [
+        ...collectGraphqlErrors(json, "metafieldsSet"),
+        ...collectGraphqlErrors(json, "productUpdate"),
+      ];
+      if (errs.length > 0) errors.push(...errs);
+
+      return {
+        mode,
+        action: "Tag only — restored product status to ACTIVE & visible on storefront",
+        changed: errs.length === 0,
+        errors,
+      };
+    } catch (err) {
+      errors.push(err.message);
+      return { mode, action: "Tag only — no status change needed", changed: false, errors };
+    }
   }
 
   if (mode === "UNPUBLISH_CHANNEL") {
@@ -1526,6 +1877,59 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
     }
   }
 
+  if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
+    try {
+      const res = await admin.graphql(
+        `#graphql
+          mutation removeUnlistedSeoMetafield($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+              metafields { id key value }
+              userErrors { field message }
+            }
+          }
+        `,
+        {
+          variables: {
+            metafields: [
+              {
+                ownerId: id,
+                namespace: "seo",
+                key: "hidden",
+                value: "0",
+                type: "number_integer",
+              },
+            ],
+          },
+        }
+      );
+      const json = await res.json();
+      const errs = collectGraphqlErrors(json, "metafieldsSet");
+      if (errs.length > 0) errors.push(...errs);
+
+      await admin.graphql(
+        `#graphql
+          mutation restoreProductActive($input: ProductInput!) {
+            productUpdate(input: $input) {
+              product { id status }
+              userErrors { field message }
+            }
+          }
+        `,
+        { variables: { input: { id, status: "ACTIVE" } } }
+      );
+
+      return {
+        mode,
+        action: "Restored to Storefront & Search (Product ACTIVE, seo.hidden = 0)",
+        changed: errors.length === 0,
+        errors,
+      };
+    } catch (err) {
+      errors.push(err.message);
+      return { mode, action: "Restore Unlisted Active", changed: false, errors };
+    }
+  }
+
   try {
     const res = await admin.graphql(
       `#graphql
@@ -1549,15 +1953,73 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
 }
 
 /**
- * Schedule an automated restock and auto-unhide event
+ * Read a product's current status, tags, seo.hidden metafield and per-variant
+ * quantities in one call — the live state a scheduled job must re-check before
+ * acting on a decision that was made minutes (or days) earlier.
  */
-export async function scheduleProductRestock(admin, { shop, productId, variantId, inventoryItemId, locationId, productTitle, variantTitle, sku }) {
+export async function fetchProductStockState(admin, productId) {
+  const id = ensureGid(productId, "Product");
+  if (!admin || !id) return null;
+
+  try {
+    const res = await admin.graphql(
+      `#graphql
+        query productStockState($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            status
+            tags
+            seoHidden: metafield(namespace: "seo", key: "hidden") { value }
+            variants(first: 100) {
+              pageInfo { hasNextPage }
+              edges { node { id title inventoryQuantity } }
+            }
+          }
+        }
+      `,
+      { variables: { id } }
+    );
+    const json = await res.json();
+    const product = json.data?.product;
+    if (!product) return null;
+
+    return {
+      id: product.id,
+      title: product.title,
+      status: product.status,
+      tags: product.tags || [],
+      seoHidden: product.seoHidden?.value ?? null,
+      quantities: (product.variants?.edges || []).map((e) => e.node.inventoryQuantity ?? 0),
+      variantsTruncated: Boolean(product.variants?.pageInfo?.hasNextPage),
+    };
+  } catch (err) {
+    console.warn(`[fetchProductStockState] Could not read ${id}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Schedule an automated restock and auto-unhide event.
+ *
+ * `jobType` decides what the job does when it fires:
+ *  - AUTO_FILL (scheduled at stockout) refills the variant to autoFillQuantity and
+ *    then reverses the stockout actions.
+ *  - UNHIDE (scheduled when the merchant restocks the product themselves) only
+ *    applies the configured delay before removing the out-of-stock tag and
+ *    restoring visibility, which is what the Rules page promises.
+ */
+export async function scheduleProductRestock(
+  admin,
+  { shop, productId, variantId, inventoryItemId, locationId, productTitle, variantTitle, sku, jobType = "AUTO_FILL" }
+) {
   if (!isDbConfigured()) return null;
   await tryConnectDB();
 
   const settings = await getInventorySettings(shop);
   const delayMs = calculateDelayMs(settings.restockDelayValue, settings.restockDelayUnit);
-  const targetQuantity = settings.enableAutoFill ? (settings.autoFillQuantity || 10) : 0;
+  // An unhide job never touches inventory — the merchant already restocked.
+  const targetQuantity = jobType === "UNHIDE" ? 0 : settings.enableAutoFill ? (settings.autoFillQuantity || 10) : 0;
   const scheduledAt = new Date(Date.now() + delayMs);
 
   const finalInventoryItemId = ensureGid(inventoryItemId, "InventoryItem");
@@ -1582,6 +2044,9 @@ export async function scheduleProductRestock(admin, { shop, productId, variantId
       shop,
       productId: finalProductId,
       status: "PENDING",
+      // Scoped per type: an unhide waiting out its delay must not block the
+      // auto-fill a later stockout schedules, and vice versa.
+      ...(jobType === "AUTO_FILL" ? { jobType: { $in: ["AUTO_FILL", null] } } : { jobType }),
     }).lean()
   );
 
@@ -1607,10 +2072,11 @@ export async function scheduleProductRestock(admin, { shop, productId, variantId
       targetQuantity,
       scheduledAt,
       status: "PENDING",
+      jobType,
     })
   );
 
-  console.log(`[ScheduledRestock] Created job ${record.id} for product ${productTitle} scheduled at ${scheduledAt.toISOString()} (delay: ${delayMs}ms, targetQuantity: ${targetQuantity})`);
+  console.log(`[ScheduledRestock] Created ${jobType} job ${record.id} for product ${productTitle} scheduled at ${scheduledAt.toISOString()} (delay: ${delayMs}ms, targetQuantity: ${targetQuantity})`);
 
   // If delay is short (<= 24 hours), schedule in-memory timer
   if (delayMs >= 0 && delayMs <= 86400000) {
@@ -1717,7 +2183,39 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
     return null;
   }
 
-  // 2. Remove Out-of-Stock Tag
+  const isUnhideJob = record.jobType === "UNHIDE";
+
+  // 2. Never un-hide a product that is still out of stock. Two jobs can reach this
+  // point without any stock behind them: an UNHIDE whose product sold out again
+  // while the delay ran, and a stockout-scheduled job with auto-fill switched off.
+  // The check is skipped right after a successful auto-fill, whose own mutation is
+  // the proof of stock and whose read-back can still be stale.
+  if (record.targetQuantity <= 0) {
+    const stockState = await fetchProductStockState(adminClient, productId);
+    if (stockState && !stockState.variantsTruncated) {
+      const stillStockedOut = evaluateStockoutCondition(stockState.quantities, settings.variantStrategy);
+      if (stillStockedOut) {
+        await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "CANCELLED" } });
+        await createAutomationLog({
+          shop,
+          eventType: isUnhideJob ? "SCHEDULED_UNHIDE" : "AUTO_FILL_RESTOCK",
+          productId,
+          productTitle: stockState.title || context.productTitle || "Product",
+          variantTitle: context.variantTitle || "",
+          sku: context.sku || "",
+          quantity: 0,
+          actionTaken: `[Scheduled Timer] Auto-unhide skipped — product still meets the ${settings.variantStrategy} stockout condition`,
+          status: "SUCCESS",
+          details: `Variant quantities: ${stockState.quantities.join(", ")}`,
+        });
+        console.log(`[ScheduledRestock] Job ${restockId} cancelled: ${productId} is still out of stock`);
+        // Skipped on purpose — not a failure, so the cron summary must not count it as one.
+        return { skipped: true, reason: "still-out-of-stock", productId };
+      }
+    }
+  }
+
+  // 3. Remove Out-of-Stock Tag
   const warnings = [];
   const tagToRemove = settings.outOfStockTag || "out-of-stock";
   try {
@@ -1745,7 +2243,7 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
     console.warn(`[ScheduledRestock] Tags remove error:`, err.message);
   }
 
-  // 3. Auto-Unhide Product, reversing whatever the configured Visibility Mode did
+  // 4. Auto-Unhide Product, reversing whatever the configured Visibility Mode did
   const restored = await restoreProductVisibility(adminClient, {
     productId,
     visibilityMode: settings.visibilityMode,
@@ -1765,11 +2263,13 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
   const filledSummary =
     record.targetQuantity > 0
       ? `Auto-filled stock to ${record.targetQuantity} units & ${restored.action} [${restored.mode}]`
-      : `Removed tag '${tagToRemove}' & ${restored.action} [${restored.mode}] (auto-fill disabled)`;
+      : isUnhideJob
+        ? `Restock delay elapsed — removed tag '${tagToRemove}' & ${restored.action} [${restored.mode}]`
+        : `Removed tag '${tagToRemove}' & ${restored.action} [${restored.mode}] (auto-fill disabled)`;
 
   await createAutomationLog({
     shop,
-    eventType: "AUTO_FILL_RESTOCK",
+    eventType: isUnhideJob ? "SCHEDULED_UNHIDE" : "AUTO_FILL_RESTOCK",
     productId,
     productTitle: context.productTitle || "Product Restocked",
     variantTitle: context.variantTitle || "",
@@ -1793,7 +2293,7 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
  * restart, a redeploy, or on a host that runs several instances.
  */
 export async function processDueScheduledRestocks({ limit = 100 } = {}) {
-  if (!isDbConfigured()) return { processed: 0, failed: 0, shops: 0, deferred: 0 };
+  if (!isDbConfigured()) return { processed: 0, skipped: 0, failed: 0, shops: 0, deferred: 0 };
   await tryConnectDB();
 
   const due = plainAll(
@@ -1811,6 +2311,7 @@ export async function processDueScheduledRestocks({ limit = 100 } = {}) {
 
   let processed = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const [shop, jobs] of byShop.entries()) {
     // One admin client per shop rather than one per job
@@ -1827,7 +2328,8 @@ export async function processDueScheduledRestocks({ limit = 100 } = {}) {
     for (const job of jobs) {
       try {
         const result = await executeScheduledRestock(adminClient, job.id, { shop });
-        if (result) processed++;
+        if (result?.skipped) skipped++;
+        else if (result) processed++;
         else failed++;
       } catch (err) {
         failed++;
@@ -1847,7 +2349,50 @@ export async function processDueScheduledRestocks({ limit = 100 } = {}) {
     }
   }
 
-  return { processed, failed, shops: byShop.size, deferred };
+  return { processed, skipped, failed, shops: byShop.size, deferred };
+}
+
+/**
+ * Re-run the stockout scan for every installed shop.
+ *
+ * inventory_levels/update is the only real-time trigger, and a webhook delivered
+ * while the app is down (a redeploy, a dev tunnel that is not running) is gone for
+ * good — the product sits at 0 quantity, still ACTIVE and untagged, until someone
+ * happens to open the app. This is the catch-up: run it from the same cron as the
+ * due-restock pass and any stockout the app missed is applied within a cron tick.
+ */
+export async function reconcileStockoutsForAllShops({ limit = 50 } = {}) {
+  if (!isDbConfigured()) return { shops: 0, scanned: 0, results: [] };
+  await tryConnectDB();
+
+  const shops = (await Session.distinct("shop")).filter(Boolean).slice(0, limit);
+  const results = [];
+
+  for (const shop of shops) {
+    let adminClient = null;
+    try {
+      const unauthRes = await unauthenticated.admin(shop);
+      adminClient = unauthRes.admin;
+    } catch (err) {
+      console.error(`[Cron] No admin client for ${shop} (app uninstalled or token revoked?):`, err.message);
+      results.push({ shop, error: err.message });
+      continue;
+    }
+
+    try {
+      const result = await runStockoutAutomationScan(adminClient, shop);
+      results.push({ shop, ...result });
+    } catch (err) {
+      console.error(`[Cron] Reconciliation scan failed for ${shop}:`, err.message);
+      results.push({ shop, error: err.message });
+    }
+  }
+
+  return {
+    shops: shops.length,
+    scanned: results.reduce((sum, r) => sum + (r.scanned || 0), 0),
+    results,
+  };
 }
 
 /**

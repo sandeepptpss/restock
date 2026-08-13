@@ -163,14 +163,14 @@ export const action = async ({ request }) => {
     return { success: true, subscription: updatedSub, plan };
   }
 
+  // Only the fields this form actually renders are sent. The automation toggles
+  // (enableAutoTag / enableAutoHide / enableAutoPublish / enableEmailAlerts) live on
+  // the Rules page and have no checkbox here, so submitting `formData.has(...)` for
+  // them posted false and silently switched the whole automation off every time a
+  // merchant saved an unrelated field on this page.
   const updated = await updateInventorySettings(session.shop, {
     defaultLowStockLimit: formData.get("defaultLowStockLimit"),
-    enableAutoTag: formData.has("enableAutoTag"),
     outOfStockTag: formData.get("outOfStockTag"),
-    enableAutoHide: formData.has("enableAutoHide"),
-    enableAutoPublish: formData.has("enableAutoPublish"),
-    enableEmailAlerts: formData.has("enableEmailAlerts"),
-    alertEmail: formData.get("alertEmail"),
     leadTimeDays: formData.get("leadTimeDays"),
     targetStockDays: formData.get("targetStockDays"),
   });

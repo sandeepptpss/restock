@@ -159,6 +159,10 @@ const scheduledRestockSchema = new Schema(
     targetQuantity: { type: Number, default: 10 },
     scheduledAt: { type: Date, required: true },
     status: { type: String, default: "PENDING" },
+    // AUTO_FILL: scheduled at stockout, refills the variant to autoFillQuantity.
+    // UNHIDE: scheduled when the merchant restocks, applies the configured delay
+    // before removing the out-of-stock tag and reversing the visibility mode.
+    jobType: { type: String, default: "AUTO_FILL" },
   },
   { timestamps: { createdAt: true, updatedAt: false }, collection: "scheduledrestocks" }
 );

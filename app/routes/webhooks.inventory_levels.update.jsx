@@ -9,12 +9,14 @@ import {
   processPendingScheduledRestocks,
   evaluateStockoutCondition,
   needsVisibilityRestore,
+  calculateDelayMs,
   classifyInventoryTransition,
   classifyLowStockTransition,
   describeTransition,
   applyStockoutVisibility,
   restoreProductVisibility,
   INVENTORY_TRANSITION,
+  checkThemeAppEmbedEnabled,
 } from "../models/inventory.server";
 
 export const action = async ({ request }) => {
@@ -57,6 +59,13 @@ export const action = async ({ request }) => {
 
     if (!admin) {
       console.error(`[Webhook] No admin client available for shop ${shop}`);
+      return new Response(null, { status: 200 });
+    }
+
+    // Check if Theme App Embed is UNCHECKED in Shopify Theme Editor. If unchecked, stop automation!
+    const isEmbedEnabled = await checkThemeAppEmbedEnabled(admin, shop);
+    if (!isEmbedEnabled) {
+      console.log(`[Webhook] Theme App Embed is UNCHECKED in Shopify Theme Editor for ${shop}. Skipping webhook automation.`);
       return new Response(null, { status: 200 });
     }
 
@@ -107,6 +116,11 @@ export const action = async ({ request }) => {
                 title
                 status
                 tags
+                # Set by the UNLISTED/ACTIVE_HIDDEN visibility modes, which keep the
+                # product ACTIVE — the only way to tell that the app hid it.
+                seoHidden: metafield(namespace: "seo", key: "hidden") {
+                  value
+                }
                 variants(first: 100) {
                   pageInfo { hasNextPage }
                   edges {
@@ -188,6 +202,10 @@ export const action = async ({ request }) => {
     // 4b. STOCKOUT RULE EVALUATION (every variant now empty)
     else if (transition.type === INVENTORY_TRANSITION.STOCKOUT) {
       const tagToApply = settings.outOfStockTag || "out-of-stock";
+
+      // The product emptied again before an earlier restock's unhide delay ran out,
+      // so that job would un-hide a product that is out of stock.
+      await cancelPendingRestocks(shop, product.id, { jobType: "UNHIDE", reason: "re-emptied" });
 
       // 1. Add Tag via tagsAdd GraphQL mutation (only if Auto-Tag is enabled)
       if (settings.enableAutoTag !== false) {
@@ -294,7 +312,11 @@ export const action = async ({ request }) => {
 
         const tagNeedsRemoving = settings.enableAutoTag !== false && existingTags.includes(tagToRemove);
         const visibilityNeedsRestoring =
-          settings.enableAutoPublish !== false && needsVisibilityRestore(product.status, settings.visibilityMode);
+          settings.enableAutoPublish !== false &&
+          needsVisibilityRestore(
+            { status: product.status, seoHidden: product.seoHidden?.value ?? null },
+            settings.visibilityMode
+          );
 
         // Nothing left to undo — the product is already visible and untagged, which
         // is the usual case for a repeated webhook. Acting anyway is what produced
@@ -303,6 +325,42 @@ export const action = async ({ request }) => {
           console.log(
             `[Webhook] ${product.title} restocked (${describeTransition(transition)}) but already visible and untagged; no action needed`
           );
+          return;
+        }
+
+        // The Restock Delay is a hold-down on coming back: the Rules page promises
+        // "when inventory is restocked, the system waits <delay> before setting the
+        // status to ACTIVE and removing out-of-stock tags". Both the untag and the
+        // visibility restore move into a scheduled UNHIDE job so the product stays
+        // hidden for the full delay instead of reappearing on this webhook.
+        const unhideDelayMs = calculateDelayMs(settings.restockDelayValue, settings.restockDelayUnit);
+        if (unhideDelayMs > 0) {
+          const job = await scheduleProductRestock(admin, {
+            shop,
+            productId: product.id,
+            variantId: variant.id,
+            inventoryItemId,
+            locationId,
+            productTitle: product.title,
+            variantTitle: variant.title,
+            sku: variant.sku,
+            jobType: "UNHIDE",
+          });
+
+          logsToCreate.push({
+            shop,
+            eventType: "SCHEDULED_UNHIDE",
+            productId: product.id,
+            productTitle: product.title,
+            variantTitle: variant.title,
+            sku: variant.sku,
+            quantity: newAvailable,
+            actionTaken: `[Webhook Trigger] Restocked — auto-unhide scheduled in ${settings.restockDelayValue} ${settings.restockDelayUnit} (${variantSummary})`,
+            status: job ? "SUCCESS" : "FAILED",
+            details: job
+              ? `Tag '${tagToRemove}' removal and the ${settings.visibilityMode} restore run at ${new Date(Date.now() + unhideDelayMs).toISOString()}`
+              : "Could not persist the scheduled unhide job",
+          });
           return;
         }
 
