@@ -79,21 +79,22 @@ For more information on the Shopify Dev MCP please read [the documentation](http
 
 ### Application Storage
 
-This template uses [Prisma](https://www.prisma.io/) to store session data, by default using an [SQLite](https://www.sqlite.org/index.html) database.
-The database is defined as a Prisma schema in `prisma/schema.prisma`.
+This app uses [MongoDB](https://www.mongodb.com/) through [Mongoose](https://mongoosejs.com/) for both Shopify session storage and its own inventory data.
 
-This use of SQLite works in production if your app runs as a single instance.
-The database that works best for you depends on the data your app needs and how it is queried.
-Here’s a short list of databases providers that provide a free tier to get started:
+- Connection: [app/db.server.js](app/db.server.js) — a single pooled connection cached on `global` so hot reload does not open a new pool per rebuild.
+- Schemas: [app/models/schemas.server.js](app/models/schemas.server.js) — sessions, settings, thresholds, rules, inventory events, automation logs, subscriptions, scheduled restocks.
+- Session storage: [app/models/session.server.js](app/models/session.server.js) — a Mongoose implementation of Shopify's `SessionStorage` interface, wired up in [app/shopify.server.js](app/shopify.server.js).
 
-| Database   | Type             | Hosters                                                                                                                                                                                                                                    |
-| ---------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| MySQL      | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mysql), [Planet Scale](https://planetscale.com/), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/mysql) |
-| PostgreSQL | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-postgresql), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/postgres)                                   |
-| Redis      | Key-value        | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-redis), [Amazon MemoryDB](https://aws.amazon.com/memorydb/)                                                                                                        |
-| MongoDB    | NoSQL / Document | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mongodb), [MongoDB Atlas](https://www.mongodb.com/atlas/database)                                                                                                  |
+Configure it with two environment variables (see `.env.example`):
 
-To use one of these, you can use a different [datasource provider](https://www.prisma.io/docs/reference/api-reference/prisma-schema-reference#datasource) in your `schema.prisma` file, or a different [SessionStorage adapter package](https://github.com/Shopify/shopify-api-js/blob/main/packages/shopify-api/docs/guides/session-storage.md).
+```shell
+MONGODB_URI="mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority"
+MONGODB_DB="stock-shield"
+```
+
+There is no migration step — Mongoose creates the collections and their indexes on first use. If `MONGODB_URI` is unset the app still boots: database-backed features fall back to defaults and empty lists rather than crashing.
+
+When deploying, make sure the host's outbound IP is on your Atlas **Network Access** allowlist, or connections will time out.
 
 ### Build
 
@@ -197,24 +198,13 @@ To test [streaming using await](https://reactrouter.com/api/components/Await#awa
 
 This is because a JWT token is expired. If you are consistently getting this error, it could be that the clock on your machine is not in sync with the server. To fix this ensure you have enabled "Set time and date automatically" in the "Date and Time" settings on your computer.
 
-### Using MongoDB and Prisma
+### MongooseServerSelectionError / connection timeouts
 
-If you choose to use MongoDB with Prisma, there are some gotchas in Prisma's MongoDB support to be aware of. Please see the [Prisma SessionStorage README](https://www.npmjs.com/package/@shopify/shopify-app-session-storage-prisma#mongodb).
+The connection is configured to fail after 10 seconds rather than hang a request. The usual causes:
 
-### Unable to require(`C:\...\query_engine-windows.dll.node`).
-
-Unable to require(`C:\...\query_engine-windows.dll.node`).
-The Prisma engines do not seem to be compatible with your system.
-
-query_engine-windows.dll.node is not a valid Win32 application.
-
-**Fix:** Set the environment variable:
-
-```shell
-PRISMA_CLIENT_ENGINE_TYPE=binary
-```
-
-This forces Prisma to use the binary engine mode, which runs the query engine as a separate process and can work via emulation on Windows ARM64.
+- The machine's public IP is not on the cluster's Atlas **Network Access** allowlist. A developer machine's IP changes; a deployed host needs its own entry.
+- The password in `MONGODB_URI` contains a reserved character (`@ : / ? # & %`) and was not URL-encoded.
+- `MONGODB_URI` is unset. The app logs `MONGODB_URI is not set — database features are disabled.` at boot and serves defaults instead of stored data.
 
 ## Resources
 

@@ -17,7 +17,7 @@ export const action = async ({ request }) => {
 
   const data = {
     defaultLowStockLimit: formData.get("defaultLowStockLimit"),
-    visibilityMode: formData.get("visibilityMode") || "DRAFT",
+    visibilityMode: formData.get("visibilityMode") || "UNLISTED",
     variantStrategy: formData.get("variantStrategy") || "HIDE_ALL_OOS",
     restockDelayValue: formData.get("restockDelayValue"),
     restockDelayUnit: formData.get("restockDelayUnit") || "IMMEDIATE",
@@ -38,7 +38,6 @@ export const action = async ({ request }) => {
 
   const updated = await updateInventorySettings(session.shop, data);
   
-  // Trigger scan immediately upon saving rules to tag and draft 0-qty products
   await runStockoutAutomationScan(admin, session.shop);
 
   return { success: true, settings: updated };
@@ -52,7 +51,7 @@ export default function AutomationRules() {
   const settings = fetcher.data?.settings || loaderSettings;
 
   const [activeTab, setActiveTab] = useState("FLOW_ENGINE");
-  const [selectedVisibility, setSelectedVisibility] = useState(settings.visibilityMode || "DRAFT");
+  const [selectedVisibility, setSelectedVisibility] = useState(settings.visibilityMode || "UNLISTED");
   const [selectedVariantStrat, setSelectedVariantStrat] = useState(settings.variantStrategy || "HIDE_ALL_OOS");
   const [restockDelayUnit, setRestockDelayUnit] = useState(settings.restockDelayUnit || "IMMEDIATE");
   const [autoFillEnabled, setAutoFillEnabled] = useState(Boolean(settings.enableAutoFill));
@@ -61,7 +60,7 @@ export default function AutomationRules() {
 
   useEffect(() => {
     if (settings) {
-      setSelectedVisibility(settings.visibilityMode || "DRAFT");
+      setSelectedVisibility(settings.visibilityMode || "UNLISTED");
       setSelectedVariantStrat(settings.variantStrategy || "HIDE_ALL_OOS");
       setRestockDelayUnit(settings.restockDelayUnit || "IMMEDIATE");
       setAutoFillEnabled(Boolean(settings.enableAutoFill));
@@ -98,13 +97,13 @@ export default function AutomationRules() {
           className={`filter-btn ${activeTab === "FLOW_ENGINE" ? "active" : ""}`}
           onClick={() => setActiveTab("FLOW_ENGINE")}
         >
-          ⚡ Dynamic Restock &amp; Flow Pipeline
+          Dynamic Restock &amp; Flow Pipeline
         </button>
         <button
           className={`filter-btn ${activeTab === "RULES_CONFIG" ? "active" : ""}`}
           onClick={() => setActiveTab("RULES_CONFIG")}
         >
-          ⚙️ Fine-Tune Rule Parameters
+          Fine-Tune Rule Parameters
         </button>
       </div>
 
@@ -250,7 +249,7 @@ export default function AutomationRules() {
           <div>
             <div className="table-card" style={{ padding: "24px" }}>
               <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#0284c7" }}>
-                ⏱️ Dynamic Restock Delay &amp; Scheduled Auto-Unhide
+                Dynamic Restock Delay &amp; Scheduled Auto-Unhide
               </h2>
               <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "16px" }}>
                 Schedule an automated delay (Minutes, Hours, Days, Months) after restock before unhiding the product:
@@ -296,7 +295,7 @@ export default function AutomationRules() {
             {/* Auto-Fill Restock Quantity Card */}
             <div className="table-card" style={{ padding: "24px" }}>
               <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#4f46e5" }}>
-                📦 Restock Auto-Fill Quantity
+                Restock Auto-Fill Quantity
               </h2>
 
               <div className="form-switch">
@@ -336,6 +335,7 @@ export default function AutomationRules() {
 
           {/* Right Column: Variant & Visibility Settings */}
           <div>
+            {/* 1. Variant Handling Strategy Card */}
             <div className="table-card" style={{ padding: "24px" }}>
               <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#312e81" }}>
                 1. Variant Handling Strategy
@@ -350,73 +350,144 @@ export default function AutomationRules() {
                   onChange={(e) => setSelectedVariantStrat(e.target.value)}
                   style={{ background: "#ffffff", fontWeight: "600" }}
                 >
-                  <option value="HIDE_ALL_OOS">Hide product ONLY when ALL sellable variants are 0</option>
+                  <option value="HIDE_ALL_OOS">Hide product ONLY when ALL sellable variants are 0 (Recommended)</option>
                   <option value="HIDE_ANY_OOS">Hide product when ANY single variant is 0</option>
                   <option value="HIDE_THRESHOLD">Hide product when available variants drop below 2</option>
                   <option value="KEEP_VISIBLE">Keep product visible (disable out-of-stock variants only)</option>
                 </select>
               </div>
+
+              {/* Dynamic Strategy Explanation Callout */}
+              <div style={{
+                background: selectedVariantStrat === "HIDE_ALL_OOS" ? "#f0fdf4" : selectedVariantStrat === "HIDE_ANY_OOS" ? "#fff7ed" : "#f8fafc",
+                border: `1px solid ${selectedVariantStrat === "HIDE_ALL_OOS" ? "#bbf7d0" : selectedVariantStrat === "HIDE_ANY_OOS" ? "#fed7aa" : "#e2e8f0"}`,
+                borderRadius: "8px",
+                padding: "12px",
+                marginTop: "12px",
+                fontSize: "12px",
+                color: "#1e293b"
+              }}>
+                {selectedVariantStrat === "HIDE_ALL_OOS" && (
+                  <span><strong>Recommended Default:</strong> Keeps product visible on storefront as long as at least 1 variant (e.g. Size M) is in stock. Hides product only when 100% sold out.</span>
+                )}
+                {selectedVariantStrat === "HIDE_ANY_OOS" && (
+                  <span><strong>Strict Hiding:</strong> Hides the entire product page immediately if even 1 variant (e.g. Size Small) runs out of stock, even if other sizes are available.</span>
+                )}
+                {selectedVariantStrat === "HIDE_THRESHOLD" && (
+                  <span><strong>Low Stock Buffer:</strong> Hides product when available variants drop below 2 to prevent overselling low-inventory items.</span>
+                )}
+                {selectedVariantStrat === "KEEP_VISIBLE" && (
+                  <span><strong>Always Visible:</strong> Product page is never hidden. Sold-out variants will be disabled by your theme.</span>
+                )}
+              </div>
             </div>
 
+            {/* 2. Storefront Visibility Mode & Tags Card */}
             <div className="table-card" style={{ padding: "24px" }}>
               <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#059669" }}>
                 2. Storefront Visibility Mode &amp; Tags
               </h2>
 
-              <div className="form-group">
-                <label className="form-label" htmlFor="field-visibilityMode">Visibility Mode Action</label>
-                <select id="field-visibilityMode"
-                  name="visibilityMode"
-                  className="form-input"
-                  value={selectedVisibility}
-                  onChange={(e) => setSelectedVisibility(e.target.value)}
-                  style={{ background: "#ffffff", fontWeight: "600" }}
-                >
-                  <option value="DRAFT">Set Status to DRAFT (Hide from Storefront, Collections &amp; Search)</option>
-                  <option value="TAG_ONLY">Tag Only (Keep Product Visible, Let Theme Show Badge)</option>
-                  <option value="UNPUBLISH_CHANNEL">Unpublish from Online Store Sales Channel</option>
-                  <option value="UNLISTED">Unlisted (Storefront Direct Link Access Only)</option>
-                </select>
-              </div>
-
-              <div className="form-switch" style={{ marginTop: "16px" }}>
+              <div className="form-switch" style={{ marginBottom: "16px", background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <div>
-                  <strong style={{ display: "block", fontSize: "14px" }}>Auto-Hide / Draft Out of Stock</strong>
+                  <strong style={{ display: "block", fontSize: "14px", color: "#0f172a" }}>Auto-Hide Storefront Action</strong>
                   <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-                    Automatically set product status to DRAFT when all sellable variants reach 0 stock
+                    Automatically execute visibility change when stockout condition is met
                   </span>
                 </div>
                 <input
                   type="checkbox"
                   name="enableAutoHide"
                   checked={autoHideEnabled}
-                  onChange={(e) => setAutoHideEnabled(e.target.checked)}
-                  style={{ width: "20px", height: "20px" }}
+                  onChange={(e) => {
+                    setAutoHideEnabled(e.target.checked);
+                    if (!e.target.checked) {
+                      setSelectedVisibility("TAG_ONLY");
+                    }
+                  }}
+                  style={{ width: "20px", height: "20px", cursor: "pointer" }}
                 />
               </div>
 
-              <div className="form-switch" style={{ marginTop: "16px" }}>
+              <div className="form-group" style={{ opacity: autoHideEnabled ? 1 : 0.6 }}>
+                <label className="form-label" htmlFor="field-visibilityMode">Visibility Mode Action</label>
+                <select id="field-visibilityMode"
+                  name="visibilityMode"
+                  className="form-input"
+                  value={selectedVisibility}
+                  disabled={!autoHideEnabled}
+                  onChange={(e) => {
+                    setSelectedVisibility(e.target.value);
+                    if (e.target.value !== "TAG_ONLY" && !autoHideEnabled) {
+                      setAutoHideEnabled(true);
+                    }
+                  }}
+                  style={{ background: "#ffffff", fontWeight: "600" }}
+                >
+                  <option value="UNLISTED">Unlisted (Storefront Direct Link Access Only - Recommended)</option>
+                  <option value="DRAFT">Set Status to DRAFT (Hide from Storefront, Collections &amp; Search)</option>
+                  <option value="TAG_ONLY">Tag Only (Keep Product Visible, Let Theme Show Badge)</option>
+                  <option value="UNPUBLISH_CHANNEL">Unpublish from Online Store Sales Channel</option>
+                </select>
+              </div>
+
+              {/* Dynamic Visibility Preview Badge */}
+              <div style={{
+                background: selectedVisibility === "UNLISTED" ? "#eff6ff" : selectedVisibility === "DRAFT" ? "#fef2f2" : "#f8fafc",
+                border: `1px solid ${selectedVisibility === "UNLISTED" ? "#bfdbfe" : selectedVisibility === "DRAFT" ? "#fecaca" : "#e2e8f0"}`,
+                borderRadius: "8px",
+                padding: "12px",
+                marginTop: "12px",
+                fontSize: "12px",
+                color: "#1e293b"
+              }}>
+                {selectedVisibility === "UNLISTED" && (
+                  <span><strong>Unlisted Mode (Best for SEO &amp; Back-in-Stock):</strong> Hides product from collection pages &amp; site search, but direct URL remains active for customer restock requests.</span>
+                )}
+                {selectedVisibility === "DRAFT" && (
+                  <span><strong>Draft Mode:</strong> Product is completely unpublished from storefront, search, and direct links (direct URL returns 404 page).</span>
+                )}
+                {selectedVisibility === "TAG_ONLY" && (
+                  <span><strong>Tag Only Mode:</strong> Product stays Active. App only applies the out-of-stock tag so your theme can show a sold-out badge.</span>
+                )}
+                {selectedVisibility === "UNPUBLISH_CHANNEL" && (
+                  <span><strong>Unpublish Channel:</strong> Unpublishes product from the Online Store sales channel while keeping product status intact.</span>
+                )}
+              </div>
+
+              <hr style={{ border: "0", borderTop: "1px solid #e2e8f0", margin: "20px 0" }} />
+
+              <div className="form-switch">
                 <div>
                   <strong style={{ display: "block", fontSize: "14px" }}>Auto-Tag Out of Stock</strong>
+                  <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+                    Automatically add tag to product upon stockout &amp; remove upon restock
+                  </span>
                 </div>
                 <input
                   type="checkbox"
                   name="enableAutoTag"
                   checked={taggingEnabled}
                   onChange={(e) => setTaggingEnabled(e.target.checked)}
-                  style={{ width: "20px", height: "20px" }}
+                  style={{ width: "20px", height: "20px", cursor: "pointer" }}
                 />
               </div>
 
-              <div className="form-group" style={{ marginTop: "12px" }}>
-                <label className="form-label" htmlFor="field-outOfStockTag">Out-of-Stock Tag Name</label>
-                <input id="field-outOfStockTag"
-                  type="text"
-                  name="outOfStockTag"
-                  defaultValue={settings.outOfStockTag}
-                  className="form-input"
-                />
-              </div>
+              {taggingEnabled && (
+                <div className="form-group" style={{ marginTop: "12px" }}>
+                  <label className="form-label" htmlFor="field-outOfStockTag">Out-of-Stock Tag Name</label>
+                  <input id="field-outOfStockTag"
+                    type="text"
+                    name="outOfStockTag"
+                    defaultValue={settings.outOfStockTag}
+                    className="form-input"
+                    placeholder="e.g. out-of-stock"
+                  />
+                  <span style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px", display: "block" }}>
+                    Used by Shopify themes (Prestige, Dawn, Impulse) to display sold-out badges and filter collections.
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -428,7 +499,7 @@ export default function AutomationRules() {
             disabled={isSubmitting}
             style={{ padding: "14px 32px", fontSize: "15px", background: "#0284c7" }}
           >
-            {isSubmitting ? "Updating Restock Settings..." : "💾 Save & Apply Dynamic Restock Rules"}
+            {isSubmitting ? "Updating Restock Settings..." : "Save & Apply Dynamic Restock Rules"}
           </button>
         </div>
       </fetcher.Form>

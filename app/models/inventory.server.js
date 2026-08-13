@@ -1,5 +1,18 @@
 import { randomUUID } from "node:crypto";
-import prisma from "../db.server";
+import mongoose, { isDbConfigured, tryConnectDB } from "../db.server";
+import {
+  AutomationLog,
+  AutomationRule,
+  InventoryEvent,
+  InventorySettings,
+  ProductThreshold,
+  ScheduledRestock,
+  Session,
+  Subscription,
+  SupportTicket,
+  plain,
+  plainAll,
+} from "./schemas.server";
 import { unauthenticated } from "../shopify.server";
 
 // Safety cap on how much of a catalogue one scan walks through, so a very large
@@ -43,7 +56,10 @@ async function graphqlWithRetry(admin, query, options = {}, { attempts = 3 } = {
 const DEFAULT_SETTINGS = (shop) => ({
   shop,
   defaultLowStockLimit: 5,
-  visibilityMode: "DRAFT",
+  // UNLISTED keeps the product out of collections, storefront search, predictive
+  // search, recommendations and the sitemap while leaving its URL reachable, so
+  // the "Notify me when back in stock" block still has a page to render on.
+  visibilityMode: "UNLISTED",
   variantStrategy: "HIDE_ALL_OOS",
   locationStrategy: "ALL_LOCATIONS",
   restockDelayValue: 0,
@@ -68,22 +84,25 @@ const DEFAULT_SETTINGS = (shop) => ({
  * Get or create default inventory settings for a shop
  */
 export async function getInventorySettings(shop) {
-  if (!prisma?.inventorySettings) {
+  if (!isDbConfigured()) {
     return DEFAULT_SETTINGS(shop);
   }
 
   try {
-    let settings = await prisma.inventorySettings.findUnique({
-      where: { shop },
-    });
+    await tryConnectDB();
+    // Upsert rather than find-then-create: two concurrent webhooks for a shop
+    // that has never been configured would otherwise race on the unique index.
+    // `shop` comes from the filter, so it is left out of $setOnInsert.
+    const defaults = DEFAULT_SETTINGS(shop);
+    delete defaults.shop;
 
-    if (!settings) {
-      settings = await prisma.inventorySettings.create({
-        data: DEFAULT_SETTINGS(shop),
-      });
-    }
+    const settings = await InventorySettings.findOneAndUpdate(
+      { shop },
+      { $setOnInsert: defaults },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+    ).lean();
 
-    return settings;
+    return plain(settings);
   } catch (err) {
     console.warn("Error loading inventorySettings from DB, falling back to default:", err.message);
     return DEFAULT_SETTINGS(shop);
@@ -94,15 +113,16 @@ export async function getInventorySettings(shop) {
  * Update inventory settings for a shop
  */
 export async function updateInventorySettings(shop, data) {
-  if (!prisma?.inventorySettings) {
+  if (!isDbConfigured()) {
     return DEFAULT_SETTINGS(shop);
   }
 
-  const existing = (await prisma.inventorySettings.findUnique({ where: { shop } })) || DEFAULT_SETTINGS(shop);
+  await tryConnectDB();
+  const existing = (await InventorySettings.findOne({ shop }).lean()) || DEFAULT_SETTINGS(shop);
 
   const mergedData = {
     defaultLowStockLimit: data.defaultLowStockLimit != null ? (Number(data.defaultLowStockLimit) || 5) : existing.defaultLowStockLimit,
-    visibilityMode: data.visibilityMode || existing.visibilityMode || "DRAFT",
+    visibilityMode: data.visibilityMode || existing.visibilityMode || "UNLISTED",
     variantStrategy: data.variantStrategy || existing.variantStrategy || "HIDE_ALL_OOS",
     locationStrategy: data.locationStrategy || existing.locationStrategy || "ALL_LOCATIONS",
     restockDelayValue: data.restockDelayValue != null ? (Number(data.restockDelayValue) || 0) : existing.restockDelayValue,
@@ -123,14 +143,13 @@ export async function updateInventorySettings(shop, data) {
     targetStockDays: data.targetStockDays != null ? (Number(data.targetStockDays) || 30) : existing.targetStockDays,
   };
 
-  return await prisma.inventorySettings.upsert({
-    where: { shop },
-    update: mergedData,
-    create: {
-      shop,
-      ...mergedData,
-    },
-  });
+  const updated = await InventorySettings.findOneAndUpdate(
+    { shop },
+    { $set: mergedData },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+  ).lean();
+
+  return plain(updated);
 }
 
 /**
@@ -138,24 +157,25 @@ export async function updateInventorySettings(shop, data) {
  * Used by the shop/redact compliance webhook.
  */
 export async function deleteShopData(shop) {
-  if (!shop) return {};
+  if (!shop || !isDbConfigured()) return {};
+  await tryConnectDB();
+
   const deleted = {};
   const targets = [
-    ["scheduledRestock", prisma?.scheduledRestock],
-    ["automationLog", prisma?.automationLog],
-    ["inventoryEvent", prisma?.inventoryEvent],
-    ["automationRule", prisma?.automationRule],
-    ["productThreshold", prisma?.productThreshold],
-    ["inventorySettings", prisma?.inventorySettings],
-    ["subscription", prisma?.subscription],
-    ["session", prisma?.session],
+    ["scheduledRestock", ScheduledRestock],
+    ["automationLog", AutomationLog],
+    ["inventoryEvent", InventoryEvent],
+    ["automationRule", AutomationRule],
+    ["productThreshold", ProductThreshold],
+    ["inventorySettings", InventorySettings],
+    ["subscription", Subscription],
+    ["session", Session],
   ];
 
   for (const [name, model] of targets) {
-    if (!model) continue;
     try {
-      const res = await model.deleteMany({ where: { shop } });
-      deleted[name] = res.count;
+      const res = await model.deleteMany({ shop });
+      deleted[name] = res.deletedCount;
     } catch (err) {
       console.error(`[deleteShopData] Failed to delete ${name} for ${shop}:`, err.message);
       deleted[name] = `error: ${err.message}`;
@@ -169,11 +189,10 @@ export async function deleteShopData(shop) {
  * Get product threshold overrides
  */
 export async function getProductThresholds(shop) {
-  if (!prisma?.productThreshold) return [];
+  if (!isDbConfigured()) return [];
   try {
-    return await prisma.productThreshold.findMany({
-      where: { shop },
-    });
+    await tryConnectDB();
+    return plainAll(await ProductThreshold.find({ shop }).lean());
   } catch (err) {
     console.warn("Error fetching productThresholds:", err.message);
     return [];
@@ -184,39 +203,31 @@ export async function getProductThresholds(shop) {
  * Update or set product custom safety threshold
  */
 export async function setProductThreshold(shop, { productId, variantId, minThreshold, customReorderQty }) {
-  if (!prisma?.productThreshold) return null;
-  return await prisma.productThreshold.upsert({
-    where: {
-      shop_productId_variantId: {
-        shop,
-        productId,
-        variantId: variantId || "",
+  if (!isDbConfigured()) return null;
+  await tryConnectDB();
+
+  const record = await ProductThreshold.findOneAndUpdate(
+    { shop, productId, variantId: variantId || "" },
+    {
+      $set: {
+        minThreshold: Number(minThreshold),
+        customReorderQty: customReorderQty ? Number(customReorderQty) : null,
       },
     },
-    update: {
-      minThreshold: Number(minThreshold),
-      customReorderQty: customReorderQty ? Number(customReorderQty) : null,
-    },
-    create: {
-      shop,
-      productId,
-      variantId: variantId || "",
-      minThreshold: Number(minThreshold),
-      customReorderQty: customReorderQty ? Number(customReorderQty) : null,
-    },
-  });
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+  ).lean();
+
+  return plain(record);
 }
 
 /**
  * Get stored automation rules for shop
  */
 export async function getAutomationRules(shop) {
-  if (!prisma?.automationRule) return [];
+  if (!isDbConfigured()) return [];
   try {
-    return await prisma.automationRule.findMany({
-      where: { shop },
-      orderBy: { createdAt: "desc" },
-    });
+    await tryConnectDB();
+    return plainAll(await AutomationRule.find({ shop }).sort({ createdAt: -1 }).lean());
   } catch (err) {
     console.warn("Error loading automationRules:", err.message);
     return [];
@@ -227,17 +238,19 @@ export async function getAutomationRules(shop) {
  * Save new automation flow rule
  */
 export async function createAutomationRule(shop, { name, trigger, conditions, actions }) {
-  if (!prisma?.automationRule) return null;
-  return await prisma.automationRule.create({
-    data: {
-      shop,
-      name,
-      trigger: trigger || "inventory_levels/update",
-      conditions: typeof conditions === "string" ? conditions : JSON.stringify(conditions),
-      actions: typeof actions === "string" ? actions : JSON.stringify(actions),
-      status: "ACTIVE",
-    },
+  if (!isDbConfigured()) return null;
+  await tryConnectDB();
+
+  const rule = await AutomationRule.create({
+    shop,
+    name,
+    trigger: trigger || "inventory_levels/update",
+    conditions: typeof conditions === "string" ? conditions : JSON.stringify(conditions),
+    actions: typeof actions === "string" ? actions : JSON.stringify(actions),
+    status: "ACTIVE",
   });
+
+  return plain(rule);
 }
 
 export const INVENTORY_TRANSITION = {
@@ -281,6 +294,34 @@ export function classifyInventoryTransition(oldQuantity, newQuantity) {
 }
 
 /**
+ * Decide whether a quantity change crosses a low-stock threshold.
+ *
+ * This is the band *between* empty and healthy, which the zero-crossing
+ * classification above deliberately ignores:
+ *   10 -> 1  (limit 5)   entered   1 -> 10  (limit 5)   left
+ *   4 -> 3   (limit 5)   neither, already low
+ *   10 -> 8  (limit 5)   neither, still healthy
+ *   1 -> 0   (limit 5)   left — zero is out of stock, not low stock
+ *
+ * A limit of 0 disables the check. With no previously recorded quantity the
+ * change is reported as `entered` when the current quantity is low, since this is
+ * the first the app knows of the item.
+ */
+export function classifyLowStockTransition(transition, threshold) {
+  const limit = Number(threshold) || 0;
+  const newQty = Number(transition?.newQuantity) || 0;
+
+  const isLow = limit > 0 && newQty > 0 && newQty <= limit;
+  const wasLow =
+    limit > 0 &&
+    Boolean(transition?.hasPrevious) &&
+    Number(transition.oldQuantity) > 0 &&
+    Number(transition.oldQuantity) <= limit;
+
+  return { threshold: limit, isLow, wasLow, entered: isLow && !wasLow, left: !isLow && wasLow };
+}
+
+/**
  * Human-readable form of a transition, for logs: "0 → 5 (RESTOCK)".
  */
 export function describeTransition(transition) {
@@ -297,18 +338,19 @@ export function describeTransition(transition) {
  * classification above and observed sales velocity possible later.
  */
 export async function recordInventoryEvent(shop, params) {
-  if (!prisma?.inventoryEvent) {
+  if (!isDbConfigured()) {
     const newQuantity = typeof params === "object" ? Number(params?.newQuantity || 0) : 0;
     return { isDuplicate: false, transition: classifyInventoryTransition(null, newQuantity) };
   }
   try {
+    await tryConnectDB();
     const webhookId = typeof params === "object" ? params?.webhookId : (params ? String(params) : null);
     const inventoryItemId = typeof params === "object" ? String(params?.inventoryItemId || "") : "";
     const newQuantity = typeof params === "object" ? Number(params?.newQuantity || 0) : 0;
     const locationId = typeof params === "object" && params?.locationId ? String(params.locationId) : null;
 
     if (webhookId) {
-      const existing = await prisma.inventoryEvent.findUnique({ where: { webhookId } });
+      const existing = await InventoryEvent.exists({ webhookId });
       if (existing) {
         console.log(`Duplicate webhook event skipped: ${webhookId}`);
         return { isDuplicate: true };
@@ -320,11 +362,12 @@ export async function recordInventoryEvent(shop, params) {
       // Scoped to the location as well: `available` in the webhook payload is
       // per-location, so the last event from a *different* location is not this
       // item's previous quantity.
-      const previous = await prisma.inventoryEvent.findFirst({
-        where: { shop, inventoryItemId, ...(locationId ? { locationId } : {}) },
-        orderBy: { createdAt: "desc" },
-        select: { newQuantity: true },
-      });
+      const previous = await InventoryEvent.findOne(
+        { shop, inventoryItemId, ...(locationId ? { locationId } : {}) },
+        { newQuantity: 1 }
+      )
+        .sort({ createdAt: -1 })
+        .lean();
       oldQuantity = previous ? previous.newQuantity : null;
     }
 
@@ -339,8 +382,9 @@ export async function recordInventoryEvent(shop, params) {
         newQuantity > oldQuantity ? "INCREASE" : newQuantity < oldQuantity ? "DECREASE" : "NO_CHANGE";
     }
 
-    const created = await prisma.inventoryEvent.create({
-      data: {
+    let created;
+    try {
+      created = await InventoryEvent.create({
         shop,
         inventoryItemId: inventoryItemId || "N/A",
         locationId,
@@ -348,10 +392,18 @@ export async function recordInventoryEvent(shop, params) {
         newQuantity,
         eventType,
         webhookId: webhookId || null,
-      },
-    });
+      });
+    } catch (writeErr) {
+      // The unique webhookId index is the real idempotency guard: the check above
+      // can be lost to a race between two deliveries of the same webhook.
+      if (writeErr?.code === 11000) {
+        console.log(`Duplicate webhook event skipped (unique index): ${webhookId}`);
+        return { isDuplicate: true };
+      }
+      throw writeErr;
+    }
 
-    return { isDuplicate: false, event: created, transition };
+    return { isDuplicate: false, event: plain(created), transition };
   } catch (err) {
     console.warn("Error recording inventory event (skipped gracefully):", err.message);
     const newQuantity = typeof params === "object" ? Number(params?.newQuantity || 0) : 0;
@@ -372,28 +424,28 @@ export async function recordInventoryEvent(shop, params) {
  */
 export async function getObservedSalesVelocity(shop, { days = VELOCITY_WINDOW_DAYS } = {}) {
   const velocity = new Map();
-  if (!prisma?.inventoryEvent || !shop) return velocity;
+  if (!isDbConfigured() || !shop) return velocity;
 
   const since = new Date(Date.now() - days * 86400000);
 
   try {
+    await tryConnectDB();
+
     // When each item was first observed, across all history — an item first seen
     // long before the window has been watched for the whole window, even though
     // its early events fall outside it.
-    const firstSeenRows = await prisma.inventoryEvent.groupBy({
-      by: ["inventoryItemId"],
-      where: { shop },
-      _min: { createdAt: true },
-    });
-    const firstSeen = new Map(
-      firstSeenRows.map((row) => [row.inventoryItemId, row._min.createdAt])
-    );
+    const firstSeenRows = await InventoryEvent.aggregate([
+      { $match: { shop } },
+      { $group: { _id: "$inventoryItemId", firstSeen: { $min: "$createdAt" } } },
+    ]);
+    const firstSeen = new Map(firstSeenRows.map((row) => [row._id, row.firstSeen]));
 
-    const events = await prisma.inventoryEvent.findMany({
-      where: { shop, createdAt: { gte: since } },
-      orderBy: { createdAt: "asc" },
-      select: { inventoryItemId: true, oldQuantity: true, newQuantity: true, createdAt: true },
-    });
+    const events = await InventoryEvent.find(
+      { shop, createdAt: { $gte: since } },
+      { inventoryItemId: 1, oldQuantity: 1, newQuantity: 1, createdAt: 1 }
+    )
+      .sort({ createdAt: 1 })
+      .lean();
 
     const unitsPerItem = new Map();
     for (const event of events) {
@@ -632,6 +684,10 @@ export async function runStockoutAutomationScan(admin, shop) {
     const totalProdInventory = productItems.reduce((sum, i) => sum + i.inventoryQuantity, 0);
     const firstItem = productItems[0];
 
+    // Tracks a tag removed during this pass, so the enforcement step below does not
+    // hide a product using the pre-removal snapshot from the catalogue fetch.
+    let outOfStockTagRemoved = false;
+
     // Determine if product qualifies for Stockout Action according to Variant Strategy
     const isProductStockout = evaluateStockoutCondition(
       productItems.map((i) => i.inventoryQuantity),
@@ -753,6 +809,7 @@ export async function runStockoutAutomationScan(admin, shop) {
             actionTaken: `Removed tag '${settings.outOfStockTag}' following inventory restock`,
             status: "SUCCESS",
           });
+          outOfStockTagRemoved = true;
         } catch (err) {
           console.error("Tags remove error:", err);
         }
@@ -786,23 +843,64 @@ export async function runStockoutAutomationScan(admin, shop) {
         });
       }
     }
+
+    // 3. TAG → VISIBILITY ENFORCEMENT
+    //
+    // The out-of-stock tag is the contract: a product carrying it must not appear
+    // in any storefront listing. The branches above only act on inventory-driven
+    // stockouts, which leaves three ways for a tagged product to stay listed —
+    // a merchant tagging it by hand, a hide that failed on an earlier run, and a
+    // product re-activated in the admin while still tagged. This closes all three.
+    //
+    // Skipped for a stockout (already handled above) and for a tag this pass just
+    // removed, whose `productTags` snapshot is now stale.
+    if (!isProductStockout && !outOfStockTagRemoved && settings.enableAutoHide !== false) {
+      const carriesOutOfStockTag = (firstItem.productTags || []).includes(settings.outOfStockTag);
+      const alreadyHidden = isHiddenForMode(firstItem.productStatus, settings.visibilityMode);
+
+      if (carriesOutOfStockTag && !alreadyHidden) {
+        const enforced = await applyStockoutVisibility(admin, {
+          productId,
+          visibilityMode: settings.visibilityMode,
+          shop,
+        });
+
+        if (enforced.errors.length > 0) {
+          console.error("[Scan] Tag visibility enforcement errors:", enforced.errors);
+        } else if (enforced.changed) {
+          hiddenCount++;
+        }
+
+        logsToCreate.push({
+          shop,
+          eventType: "AUTO_HIDE",
+          productId,
+          productTitle: firstItem.productTitle,
+          variantTitle: `${productItems.length} Variants`,
+          sku: firstItem.sku,
+          quantity: totalProdInventory,
+          actionTaken: `${enforced.action} [${enforced.mode}] — carries the '${settings.outOfStockTag}' tag, so it must not be listed`,
+          status: enforced.errors.length > 0 ? "FAILED" : "SUCCESS",
+          details: enforced.errors.length > 0 ? enforced.errors.join(" | ") : null,
+        });
+      }
+    }
   }
 
-  // Save logs to Prisma
-  if (prisma?.automationLog) {
+  // Persist the scan's logs
+  if (isDbConfigured()) {
     try {
+      await tryConnectDB();
       if (logsToCreate.length > 0) {
-        await prisma.automationLog.createMany({ data: logsToCreate });
+        await AutomationLog.insertMany(logsToCreate);
       } else {
-        await prisma.automationLog.create({
-          data: {
-            shop,
-            eventType: "SCAN_COMPLETE",
-            productTitle: "System Inventory Scan",
-            quantity: items.length,
-            actionTaken: "Automated scan finished. All catalog variants verified.",
-            status: "SUCCESS",
-          },
+        await AutomationLog.create({
+          shop,
+          eventType: "SCAN_COMPLETE",
+          productTitle: "System Inventory Scan",
+          quantity: items.length,
+          actionTaken: "Automated scan finished. All catalog variants verified.",
+          status: "SUCCESS",
         });
       }
     } catch (err) {
@@ -824,13 +922,12 @@ export async function runStockoutAutomationScan(admin, shop) {
  * Fetch automation logs for shop
  */
 export async function getAutomationLogs(shop, limit = 50) {
-  if (!prisma?.automationLog) return [];
+  if (!isDbConfigured()) return [];
   try {
-    return await prisma.automationLog.findMany({
-      where: { shop },
-      orderBy: { createdAt: "desc" },
-      take: limit,
-    });
+    await tryConnectDB();
+    return plainAll(
+      await AutomationLog.find({ shop }).sort({ createdAt: -1 }).limit(limit).lean()
+    );
   } catch (err) {
     console.warn("Error fetching automationLogs:", err.message);
     return [];
@@ -1109,22 +1206,22 @@ export async function updateInventoryQuantity(admin, { inventoryItemId, location
  * Create an automation log entry
  */
 export async function createAutomationLog(data) {
-  if (!prisma?.automationLog) return null;
+  if (!isDbConfigured()) return null;
   try {
-    return await prisma.automationLog.create({
-      data: {
-        shop: data.shop,
-        eventType: data.eventType || "INFO",
-        productId: data.productId || "",
-        productTitle: data.productTitle || "",
-        variantTitle: data.variantTitle || "",
-        sku: data.sku || "",
-        quantity: Number(data.quantity) || 0,
-        actionTaken: data.actionTaken || "",
-        status: data.status || "SUCCESS",
-        details: data.details || null,
-      },
+    await tryConnectDB();
+    const log = await AutomationLog.create({
+      shop: data.shop,
+      eventType: data.eventType || "INFO",
+      productId: data.productId || "",
+      productTitle: data.productTitle || "",
+      variantTitle: data.variantTitle || "",
+      sku: data.sku || "",
+      quantity: Number(data.quantity) || 0,
+      actionTaken: data.actionTaken || "",
+      status: data.status || "SUCCESS",
+      details: data.details || null,
     });
+    return plain(log);
   } catch (err) {
     console.warn("Error creating automation log:", err.message);
     return null;
@@ -1238,6 +1335,22 @@ export function needsVisibilityRestore(productStatus, visibilityMode) {
 }
 
 /**
+ * Whether a product is currently hidden by the configured mode.
+ *
+ * The inverse question to needsVisibilityRestore, and deliberately not the same
+ * function: UNPUBLISH_CHANNEL leaves no trace on the product status, so it is
+ * reported as not hidden and the enforcement pass simply re-asserts the
+ * unpublish, which is a no-op when it is already unpublished.
+ */
+export function isHiddenForMode(productStatus, visibilityMode) {
+  const mode = visibilityMode || "DRAFT";
+  if (mode === "TAG_ONLY") return false;
+  if (mode === "UNLISTED") return productStatus === "UNLISTED";
+  if (mode === "DRAFT") return productStatus === "DRAFT";
+  return false;
+}
+
+/**
  * Cancel restock jobs still queued for a product that has come back into stock.
  *
  * Those jobs exist only to recover from the stockout that scheduled them; once
@@ -1245,12 +1358,13 @@ export function needsVisibilityRestore(productStatus, visibilityMode) {
  * own quantity and emit a second RESTOCK/ACTIVE action for the same recovery.
  */
 export async function cancelPendingRestocks(shop, productId) {
-  if (!prisma?.scheduledRestock || !shop || !productId) return 0;
+  if (!isDbConfigured() || !shop || !productId) return 0;
   try {
-    const { count } = await prisma.scheduledRestock.updateMany({
-      where: { shop, productId: ensureGid(productId, "Product"), status: "PENDING" },
-      data: { status: "CANCELLED" },
-    });
+    await tryConnectDB();
+    const { modifiedCount: count } = await ScheduledRestock.updateMany(
+      { shop, productId: ensureGid(productId, "Product"), status: "PENDING" },
+      { $set: { status: "CANCELLED" } }
+    );
     if (count > 0) {
       console.log(`[ScheduledRestock] Cancelled ${count} pending job(s) for restocked product ${productId}`);
     }
@@ -1438,7 +1552,8 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
  * Schedule an automated restock and auto-unhide event
  */
 export async function scheduleProductRestock(admin, { shop, productId, variantId, inventoryItemId, locationId, productTitle, variantTitle, sku }) {
-  if (!prisma?.scheduledRestock) return null;
+  if (!isDbConfigured()) return null;
+  await tryConnectDB();
 
   const settings = await getInventorySettings(shop);
   const delayMs = calculateDelayMs(settings.restockDelayValue, settings.restockDelayUnit);
@@ -1462,28 +1577,28 @@ export async function scheduleProductRestock(admin, { shop, productId, variantId
   // Prevent duplicate pending restock jobs for the same product.
   // Jobs already past their scheduled time are stale (e.g. the in-memory timer was
   // lost on a server restart) and must not block a fresh schedule.
-  const existingJob = await prisma.scheduledRestock.findFirst({
-    where: {
+  const existingJob = plain(
+    await ScheduledRestock.findOne({
       shop,
       productId: finalProductId,
       status: "PENDING",
-    },
-  });
+    }).lean()
+  );
 
   if (existingJob) {
     if (existingJob.scheduledAt > new Date()) {
       console.log(`[ScheduledRestock] Job ${existingJob.id} is already PENDING for product ${productTitle} (scheduled for ${existingJob.scheduledAt.toISOString()})`);
       return existingJob;
     }
-    await prisma.scheduledRestock.update({
-      where: { id: existingJob.id },
-      data: { status: "CANCELLED" },
-    });
+    await ScheduledRestock.updateOne(
+      { _id: existingJob.id },
+      { $set: { status: "CANCELLED" } }
+    );
     console.log(`[ScheduledRestock] Cancelled stale overdue job ${existingJob.id} for product ${productTitle} and rescheduling`);
   }
 
-  const record = await prisma.scheduledRestock.create({
-    data: {
+  const record = plain(
+    await ScheduledRestock.create({
       shop,
       productId: finalProductId,
       variantId: finalVariantId,
@@ -1492,8 +1607,8 @@ export async function scheduleProductRestock(admin, { shop, productId, variantId
       targetQuantity,
       scheduledAt,
       status: "PENDING",
-    },
-  });
+    })
+  );
 
   console.log(`[ScheduledRestock] Created job ${record.id} for product ${productTitle} scheduled at ${scheduledAt.toISOString()} (delay: ${delayMs}ms, targetQuantity: ${targetQuantity})`);
 
@@ -1516,9 +1631,14 @@ export async function scheduleProductRestock(admin, { shop, productId, variantId
  * Execute a pending scheduled restock job
  */
 export async function executeScheduledRestock(admin, restockId, context = {}) {
-  if (!prisma?.scheduledRestock) return null;
+  if (!isDbConfigured()) return null;
+  if (!mongoose.isValidObjectId(restockId)) {
+    console.warn(`[ScheduledRestock] Ignoring job with invalid id: ${restockId}`);
+    return null;
+  }
+  await tryConnectDB();
 
-  const record = await prisma.scheduledRestock.findUnique({ where: { id: restockId } });
+  const record = plain(await ScheduledRestock.findById(restockId).lean());
   if (!record || record.status !== "PENDING") return null;
 
   const shop = record.shop || context.shop;
@@ -1578,10 +1698,7 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
   // the job must be reported as FAILED instead of untagging and republishing an
   // out-of-stock product.
   if (autoFillError) {
-    await prisma.scheduledRestock.update({
-      where: { id: restockId },
-      data: { status: "FAILED" },
-    });
+    await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "FAILED" } });
 
     await createAutomationLog({
       shop,
@@ -1642,10 +1759,7 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
   }
 
   // Mark record EXECUTED
-  await prisma.scheduledRestock.update({
-    where: { id: restockId },
-    data: { status: "EXECUTED" },
-  });
+  await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "EXECUTED" } });
 
   // Create log entry
   const filledSummary =
@@ -1679,13 +1793,15 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
  * restart, a redeploy, or on a host that runs several instances.
  */
 export async function processDueScheduledRestocks({ limit = 100 } = {}) {
-  if (!prisma?.scheduledRestock) return { processed: 0, failed: 0, shops: 0, deferred: 0 };
+  if (!isDbConfigured()) return { processed: 0, failed: 0, shops: 0, deferred: 0 };
+  await tryConnectDB();
 
-  const due = await prisma.scheduledRestock.findMany({
-    where: { status: "PENDING", scheduledAt: { lte: new Date() } },
-    orderBy: { scheduledAt: "asc" },
-    take: limit,
-  });
+  const due = plainAll(
+    await ScheduledRestock.find({ status: "PENDING", scheduledAt: { $lte: new Date() } })
+      .sort({ scheduledAt: 1 })
+      .limit(limit)
+      .lean()
+  );
 
   const byShop = new Map();
   for (const job of due) {
@@ -1722,8 +1838,9 @@ export async function processDueScheduledRestocks({ limit = 100 } = {}) {
 
   let deferred = 0;
   if (due.length === limit) {
-    deferred = await prisma.scheduledRestock.count({
-      where: { status: "PENDING", scheduledAt: { lte: new Date() } },
+    deferred = await ScheduledRestock.countDocuments({
+      status: "PENDING",
+      scheduledAt: { $lte: new Date() },
     });
     if (deferred > 0) {
       console.log(`[Cron] Hit the ${limit}-job batch limit; ${deferred} due job(s) deferred to the next run`);
@@ -1737,17 +1854,19 @@ export async function processDueScheduledRestocks({ limit = 100 } = {}) {
  * Process all pending scheduled restocks due for execution
  */
 export async function processPendingScheduledRestocks(admin, shop, { limit = 25 } = {}) {
-  if (!prisma?.scheduledRestock) return [];
+  if (!isDbConfigured()) return [];
+  await tryConnectDB();
 
-  const pending = await prisma.scheduledRestock.findMany({
-    where: {
+  const pending = plainAll(
+    await ScheduledRestock.find({
       shop,
       status: "PENDING",
-      scheduledAt: { lte: new Date() },
-    },
-    orderBy: { scheduledAt: "asc" },
-    take: limit,
-  });
+      scheduledAt: { $lte: new Date() },
+    })
+      .sort({ scheduledAt: 1 })
+      .limit(limit)
+      .lean()
+  );
 
   for (const job of pending) {
     try {
@@ -1758,8 +1877,10 @@ export async function processPendingScheduledRestocks(admin, shop, { limit = 25 
   }
 
   if (pending.length === limit) {
-    const remaining = await prisma.scheduledRestock.count({
-      where: { shop, status: "PENDING", scheduledAt: { lte: new Date() } },
+    const remaining = await ScheduledRestock.countDocuments({
+      shop,
+      status: "PENDING",
+      scheduledAt: { $lte: new Date() },
     });
     if (remaining > 0) {
       console.log(
@@ -1770,3 +1891,99 @@ export async function processPendingScheduledRestocks(admin, shop, { limit = 25 
 
   return pending;
 }
+
+/**
+ * Get shop active subscription plan
+ */
+export async function getShopSubscription(shop) {
+  if (!isDbConfigured()) return { plan: "GROWTH", status: "ACTIVE" };
+  try {
+    await tryConnectDB();
+    const sub = await Subscription.findOne({ shop }).lean();
+    return sub ? plain(sub) : { shop, plan: "GROWTH", status: "ACTIVE" };
+  } catch (err) {
+    console.warn("Error fetching subscription:", err.message);
+    return { shop, plan: "GROWTH", status: "ACTIVE" };
+  }
+}
+
+/**
+ * Update shop subscription plan
+ */
+export async function updateShopSubscription(shop, plan) {
+  if (!isDbConfigured()) return { shop, plan, status: "ACTIVE" };
+  await tryConnectDB();
+  const updated = await Subscription.findOneAndUpdate(
+    { shop },
+    { $set: { plan, status: "ACTIVE", startedAt: new Date() } },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+  ).lean();
+  return plain(updated);
+}
+
+/**
+ * Create a new merchant support ticket
+ */
+export async function createSupportTicket({ shop, name, email, topic, message }) {
+  if (!isDbConfigured()) {
+    return {
+      ticketId: `TICK-${Date.now().toString().slice(-4)}`,
+      shop,
+      name,
+      email,
+      topic,
+      message,
+      status: "OPEN",
+      createdAt: new Date(),
+    };
+  }
+  await tryConnectDB();
+  const ticketId = `TICK-${Math.floor(1000 + Math.random() * 9000)}`;
+  const ticket = await SupportTicket.create({
+    shop,
+    ticketId,
+    name: name || "Merchant",
+    email: email || shop,
+    topic: topic || "General Support",
+    message: message || "",
+    status: "OPEN",
+  });
+  return plain(ticket);
+}
+
+/**
+ * Get all support tickets for a shop (or all tickets if shop is ALL)
+ */
+export async function getSupportTickets(shop, limit = 50) {
+  if (!isDbConfigured()) return [];
+  try {
+    await tryConnectDB();
+    const query = shop && shop !== "ALL" ? { shop } : {};
+    const tickets = await SupportTicket.find(query).sort({ createdAt: -1 }).limit(limit).lean();
+    return plainAll(tickets);
+  } catch (err) {
+    console.warn("Error fetching support tickets:", err.message);
+    return [];
+  }
+}
+
+/**
+ * Update support ticket status and admin reply
+ */
+export async function updateSupportTicketStatus(ticketId, { status, adminReply }) {
+  if (!isDbConfigured()) return null;
+  await tryConnectDB();
+  const updateData = { status };
+  if (adminReply !== undefined) {
+    updateData.adminReply = adminReply;
+    updateData.repliedAt = new Date();
+  }
+  const updated = await SupportTicket.findOneAndUpdate(
+    { ticketId },
+    { $set: updateData },
+    { returnDocument: "after" }
+  ).lean();
+  return plain(updated);
+}
+
+

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -9,19 +9,28 @@ export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const inventoryData = await fetchShopifyInventory(admin, session.shop);
   return {
+    shop: session.shop,
     items: inventoryData.items,
     settings: inventoryData.settings,
   };
 };
 
 export default function StockRadar() {
-  const { items, settings } = useLoaderData();
+  const { shop, items, settings } = useLoaderData();
   const shopify = useAppBridge();
   const [filterRisk, setFilterRisk] = useState("ALL");
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Items without observed velocity yet are counted separately, never bucketed as
-  // "low risk" — an unknown is not the same as a healthy forecast.
+  // Pagination State
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Reset page to 1 when filters or search change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, filterRisk, pageSize]);
+
+  // Items without observed velocity yet are counted separately
   const forecastable = items.filter((i) => i.daysOfInventory != null);
   const highRiskItems = forecastable.filter((i) => i.daysOfInventory <= 7);
   const mediumRiskItems = forecastable.filter((i) => i.daysOfInventory > 7 && i.daysOfInventory <= 14);
@@ -43,6 +52,14 @@ export default function StockRadar() {
 
     return true;
   });
+
+  // Calculate Slices for Table Pagination
+  const totalFiltered = filteredItems.length;
+  const totalPages = Math.max(1, Math.ceil(totalFiltered / pageSize));
+  const validPage = Math.min(currentPage, totalPages);
+  const startIndex = totalFiltered === 0 ? 0 : (validPage - 1) * pageSize + 1;
+  const endIndex = Math.min(validPage * pageSize, totalFiltered);
+  const paginatedItems = filteredItems.slice((validPage - 1) * pageSize, validPage * pageSize);
 
   const exportCSV = () => {
     const headers = ["Product Title", "Variant", "SKU", "Current Qty", "Daily Velocity", "Days of Inventory", "Suggested Reorder Qty"];
@@ -68,14 +85,14 @@ export default function StockRadar() {
   };
 
   return (
-    <div className="stock-container">
+    <div className="stock-container" style={{ paddingBottom: "40px" }}>
       <div className="stock-header">
         <div>
           <h1>Stockout Risk Radar &amp; Forecast Engine</h1>
           <p>Predictive inventory run-rate analytics, days of supply remaining &amp; supplier reorder recommendations</p>
         </div>
         <button className="btn-primary" onClick={exportCSV} style={{ background: "#059669" }}>
-          📥 Export Reorder Sheet (CSV)
+          Export Reorder Sheet (CSV)
         </button>
       </div>
 
@@ -130,7 +147,7 @@ export default function StockRadar() {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="form-input"
-              style={{ width: "220px", padding: "6px 12px" }}
+              style={{ width: "200px", padding: "6px 12px" }}
             />
             <button className={`filter-btn ${filterRisk === "ALL" ? "active" : ""}`} onClick={() => setFilterRisk("ALL")}>
               All
@@ -163,77 +180,171 @@ export default function StockRadar() {
             </tr>
           </thead>
           <tbody>
-            {filteredItems.map((item) => {
-              const hasVelocity = item.dailyVelocity != null;
-              const rop = hasVelocity
-                ? Math.ceil(item.dailyVelocity * settings.leadTimeDays + item.threshold)
-                : null;
-              return (
-                <tr key={`${item.productId}-${item.variantId}`}>
-                  <td>
-                    <div className="product-cell">
-                      {item.imageUrl ? (
-                        <img src={item.imageUrl} alt={item.productTitle} className="product-img" />
-                      ) : (
-                        <div className="product-img" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          📦
+            {paginatedItems.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ textAlign: "center", padding: "40px", color: "var(--text-muted)" }}>
+                  No forecast items matching filter criteria.
+                </td>
+              </tr>
+            ) : (
+              paginatedItems.map((item) => {
+                const hasVelocity = item.dailyVelocity != null;
+                const rop = hasVelocity
+                  ? Math.ceil(item.dailyVelocity * settings.leadTimeDays + item.threshold)
+                  : null;
+                const numericProductId = item.productId ? item.productId.replace("gid://shopify/Product/", "") : "";
+                const productAdminUrl = numericProductId ? `https://${shop}/admin/products/${numericProductId}` : null;
+
+                return (
+                  <tr key={`${item.productId}-${item.variantId}`}>
+                    <td>
+                      <div className="product-cell">
+                        {item.imageUrl ? (
+                          <img src={item.imageUrl} alt={item.productTitle} className="product-img" />
+                        ) : (
+                          <div className="product-img" style={{ display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", color: "#94a3b8", background: "#f1f5f9" }}>
+                            IMG
+                          </div>
+                        )}
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                            <span className="product-title">{item.productTitle}</span>
+                            {productAdminUrl && (
+                              <a
+                                href={productAdminUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="Open product in Shopify Admin"
+                                style={{ textDecoration: "none", fontSize: "12px", color: "#6366f1" }}
+                              >
+                                ↗
+                              </a>
+                            )}
+                          </div>
+                          <span className="product-meta">{item.variantTitle !== "Default Title" ? item.variantTitle : ""}</span>
                         </div>
-                      )}
-                      <div>
-                        <span className="product-title">{item.productTitle}</span>
-                        <span className="product-meta">{item.variantTitle !== "Default Title" ? item.variantTitle : ""}</span>
                       </div>
-                    </div>
-                  </td>
-                  <td>
-                    <code>{item.sku}</code>
-                  </td>
-                  <td>
-                    <strong>{item.inventoryQuantity}</strong> units
-                  </td>
-                  <td>
-                    {hasVelocity ? (
-                      <span style={{ fontWeight: "600", color: "#312e81" }}>
-                        {item.dailyVelocity} units/day
+                    </td>
+                    <td>
+                      <code>{item.sku || "N/A"}</code>
+                    </td>
+                    <td>
+                      <strong>{item.inventoryQuantity}</strong> units
+                    </td>
+                    <td>
+                      {hasVelocity ? (
+                        <span style={{ fontWeight: "600", color: "#312e81" }}>
+                          {item.dailyVelocity} units/day
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--text-muted)", fontSize: "13px" }} title="Velocity is measured from observed stock movements. Keep the app installed to build up history.">
+                          — collecting data
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {item.daysOfInventory == null ? (
+                        <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>—</span>
+                      ) : item.daysOfInventory <= 7 ? (
+                        <span className="badge badge-critical">{item.daysOfInventory} Days Left</span>
+                      ) : item.daysOfInventory <= 14 ? (
+                        <span className="badge badge-warning">{item.daysOfInventory} Days Left</span>
+                      ) : (
+                        <span className="badge badge-healthy">{item.daysOfInventory} Days</span>
+                      )}
+                    </td>
+                    <td>
+                      <span style={{ background: "#f1f5f9", padding: "4px 10px", borderRadius: "6px", fontSize: "13px", fontWeight: "600" }}>
+                        {rop == null ? "—" : `${rop} units`}
                       </span>
-                    ) : (
-                      <span style={{ color: "var(--text-muted)", fontSize: "13px" }} title="Velocity is measured from observed stock movements. Keep the app installed to build up history.">
-                        — collecting data
-                      </span>
-                    )}
-                  </td>
-                  <td>
-                    {item.daysOfInventory == null ? (
-                      <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>—</span>
-                    ) : item.daysOfInventory <= 7 ? (
-                      <span className="badge badge-critical">🔥 {item.daysOfInventory} Days Left</span>
-                    ) : item.daysOfInventory <= 14 ? (
-                      <span className="badge badge-warning">⚡ {item.daysOfInventory} Days Left</span>
-                    ) : (
-                      <span className="badge badge-healthy">✅ {item.daysOfInventory} Days</span>
-                    )}
-                  </td>
-                  <td>
-                    <span style={{ background: "#f1f5f9", padding: "4px 10px", borderRadius: "6px", fontSize: "13px", fontWeight: "600" }}>
-                      {rop == null ? "—" : `${rop} units`}
-                    </span>
-                  </td>
-                  <td>
-                    {item.suggestedReorderQty == null ? (
-                      <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>—</span>
-                    ) : item.suggestedReorderQty > 0 ? (
-                      <span style={{ color: "#4f46e5", fontWeight: "800", fontSize: "15px" }}>
-                        +{item.suggestedReorderQty} units
-                      </span>
-                    ) : (
-                      <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>Fully Stocked</span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
+                    </td>
+                    <td>
+                      {item.suggestedReorderQty == null ? (
+                        <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>—</span>
+                      ) : item.suggestedReorderQty > 0 ? (
+                        <span style={{ color: "#4f46e5", fontWeight: "800", fontSize: "15px" }}>
+                          +{item.suggestedReorderQty} units
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>Fully Stocked</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
           </tbody>
         </table>
+
+        {/* INVENTORY RADAR PAGINATION BAR */}
+        <div
+          style={{
+            display: "flex",
+            justify: "space-between",
+            alignItems: "center",
+            padding: "14px 20px",
+            borderTop: "1px solid var(--border-color)",
+            background: "#f8fafc",
+            borderBottomLeftRadius: "12px",
+            borderBottomRightRadius: "12px",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
+          <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+            Showing <strong>{startIndex}</strong> – <strong>{endIndex}</strong> of <strong>{totalFiltered}</strong> forecast items
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "var(--text-muted)" }}>
+              <span>Show:</span>
+              <select
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}
+                className="form-input"
+                style={{ padding: "2px 6px", fontSize: "12px", background: "#ffffff", borderRadius: "6px" }}
+              >
+                <option value={10}>10 / page</option>
+                <option value={25}>25 / page</option>
+                <option value={50}>50 / page</option>
+              </select>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button
+                className="btn-secondary"
+                disabled={validPage <= 1}
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "12px",
+                  opacity: validPage <= 1 ? 0.5 : 1,
+                  cursor: validPage <= 1 ? "not-allowed" : "pointer",
+                }}
+              >
+                &larr; Prev
+              </button>
+
+              <span style={{ fontSize: "12px", fontWeight: "600", padding: "4px 8px", background: "#ffffff", border: "1px solid var(--border-color)", borderRadius: "6px" }}>
+                Page {validPage} of {totalPages}
+              </span>
+
+              <button
+                className="btn-secondary"
+                disabled={validPage >= totalPages}
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "12px",
+                  opacity: validPage >= totalPages ? 0.5 : 1,
+                  cursor: validPage >= totalPages ? "not-allowed" : "pointer",
+                }}
+              >
+                Next &rarr;
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

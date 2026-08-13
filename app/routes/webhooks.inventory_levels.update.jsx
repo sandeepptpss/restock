@@ -1,6 +1,7 @@
 import { authenticate, unauthenticated } from "../shopify.server";
 import {
   getInventorySettings,
+  getProductThresholds,
   recordInventoryEvent,
   createAutomationLog,
   scheduleProductRestock,
@@ -9,6 +10,7 @@ import {
   evaluateStockoutCondition,
   needsVisibilityRestore,
   classifyInventoryTransition,
+  classifyLowStockTransition,
   describeTransition,
   applyStockoutVisibility,
   restoreProductVisibility,
@@ -63,10 +65,26 @@ export const action = async ({ request }) => {
     // durable path for the backlog).
     await processPendingScheduledRestocks(admin, shop, { limit: 3 });
 
-    // 2. Only a crossing of the zero boundary is actionable. 0 → 0 (a repeated
-    // webhook for an item that is still empty) and 5 → 3 (a sale) change nothing
-    // about the product's visibility, so they must not produce an action or a log.
-    if (transition.type === INVENTORY_TRANSITION.NONE) {
+    // 2. Load the shop's configuration up front: it decides both whether this
+    // change is actionable at all and what to do about it.
+    const settings = await getInventorySettings(shop);
+    const customThresholds = await getProductThresholds(shop);
+
+    // Resolving this variant's exact low-stock threshold needs the product, which
+    // costs a GraphQL call. This upper bound over every configured limit is a
+    // cheap way to avoid paying for it on changes nowhere near a threshold.
+    const maxThreshold = Math.max(
+      Number(settings.defaultLowStockLimit) || 0,
+      ...customThresholds.map((t) => Number(t.minThreshold) || 0)
+    );
+    const nearLowStock =
+      newAvailable <= maxThreshold ||
+      (transition.hasPrevious && transition.oldQuantity <= maxThreshold);
+
+    // A change that crosses neither the zero boundary nor a low-stock limit leaves
+    // nothing to do: 0 → 0 (a repeated webhook for an item that is still empty)
+    // and 100 → 80 (a sale well clear of the limit) are not actionable.
+    if (transition.type === INVENTORY_TRANSITION.NONE && !nearLowStock) {
       console.log(
         `[Webhook] No actionable transition for inventory item ${inventoryItemId}: ${describeTransition(transition)}`
       );
@@ -123,7 +141,6 @@ export const action = async ({ request }) => {
       return new Response(null, { status: 200 });
     }
 
-    const settings = await getInventorySettings(shop);
     const logsToCreate = [];
 
     // 3. Evaluate EVERY variant of the parent product before touching the product.
@@ -251,92 +268,222 @@ export const action = async ({ request }) => {
       }
     }
     // 4c. RESTOCK RULE EVALUATION — this variant crossed 0 → >0.
+    // The body runs in its own scope so that "nothing to undo" ends the restock
+    // handling without also skipping the low-stock evaluation in step 5 — a
+    // variant can come back into stock and still be below its low-stock limit.
     else if (transition.type === INVENTORY_TRANSITION.RESTOCK) {
-      const tagToRemove = settings.outOfStockTag || "out-of-stock";
-      const existingTags = Array.isArray(product.tags) ? product.tags : [];
-      const actions = [];
-      const restockErrors = [];
+      await (async () => {
+        const tagToRemove = settings.outOfStockTag || "out-of-stock";
+        const existingTags = Array.isArray(product.tags) ? product.tags : [];
+        const actions = [];
+        const restockErrors = [];
 
-      // Under a strategy such as HIDE_ANY_OOS the product can still qualify as
-      // stocked out while this variant is buyable again — republishing it would
-      // fight the stockout rule.
-      if (isStockoutCondition) {
-        console.log(
-          `[Webhook] ${product.title} restocked on ${variant.title} but still meets the ${settings.variantStrategy} stockout condition (${variantSummary}); leaving it ${product.status}`
-        );
-        return new Response(null, { status: 200 });
-      }
+        // Under a strategy such as HIDE_ANY_OOS the product can still qualify as
+        // stocked out while this variant is buyable again — republishing it would
+        // fight the stockout rule.
+        if (isStockoutCondition) {
+          console.log(
+            `[Webhook] ${product.title} restocked on ${variant.title} but still meets the ${settings.variantStrategy} stockout condition (${variantSummary}); leaving it ${product.status}`
+          );
+          return;
+        }
 
-      // The product is buyable again, so a restock job queued by the earlier
-      // stockout would only auto-fill over the merchant's own quantity.
-      await cancelPendingRestocks(shop, product.id);
+        // The product is buyable again, so a restock job queued by the earlier
+        // stockout would only auto-fill over the merchant's own quantity.
+        await cancelPendingRestocks(shop, product.id);
 
-      const tagNeedsRemoving = settings.enableAutoTag !== false && existingTags.includes(tagToRemove);
-      const visibilityNeedsRestoring =
-        settings.enableAutoPublish !== false && needsVisibilityRestore(product.status, settings.visibilityMode);
+        const tagNeedsRemoving = settings.enableAutoTag !== false && existingTags.includes(tagToRemove);
+        const visibilityNeedsRestoring =
+          settings.enableAutoPublish !== false && needsVisibilityRestore(product.status, settings.visibilityMode);
 
-      // Nothing left to undo — the product is already visible and untagged, which
-      // is the usual case for a repeated webhook. Acting anyway is what produced
-      // the duplicate "Set status to ACTIVE" entries in the audit trail.
-      if (!tagNeedsRemoving && !visibilityNeedsRestoring) {
-        console.log(
-          `[Webhook] ${product.title} restocked (${describeTransition(transition)}) but already visible and untagged; no action needed`
-        );
-        return new Response(null, { status: 200 });
-      }
+        // Nothing left to undo — the product is already visible and untagged, which
+        // is the usual case for a repeated webhook. Acting anyway is what produced
+        // the duplicate "Set status to ACTIVE" entries in the audit trail.
+        if (!tagNeedsRemoving && !visibilityNeedsRestoring) {
+          console.log(
+            `[Webhook] ${product.title} restocked (${describeTransition(transition)}) but already visible and untagged; no action needed`
+          );
+          return;
+        }
 
-      if (tagNeedsRemoving) {
+        if (tagNeedsRemoving) {
+          try {
+            const tagRes = await admin.graphql(
+              `#graphql
+                mutation tagsRemove($id: ID!, $tags: [String!]!) {
+                  tagsRemove(id: $id, tags: $tags) {
+                    node { id }
+                    userErrors { field message }
+                  }
+                }
+              `,
+              { variables: { id: product.id, tags: [tagToRemove] } }
+            );
+            const tagJson = await tagRes.json();
+            const tagErrs = [
+              ...(tagJson.errors || []).map((e) => e.message),
+              ...(tagJson.data?.tagsRemove?.userErrors || []).map((e) => e.message),
+            ];
+            if (tagErrs.length > 0) restockErrors.push(...tagErrs);
+            else actions.push(`Removed tag '${tagToRemove}'`);
+          } catch (tagErr) {
+            restockErrors.push(tagErr.message);
+          }
+        }
+
+        // Reverse only the visibility action that the configured mode would have taken
+        if (visibilityNeedsRestoring) {
+          const restored = await restoreProductVisibility(admin, {
+            productId: product.id,
+            visibilityMode: settings.visibilityMode,
+            shop,
+          });
+          if (restored.errors.length > 0) restockErrors.push(...restored.errors);
+          actions.push(`${restored.action} [${restored.mode}]`);
+        }
+
+        if (restockErrors.length > 0) {
+          console.error("[Webhook] Error republishing restocked product:", restockErrors);
+        }
+
+        logsToCreate.push({
+          shop,
+          eventType: "RESTOCK",
+          productId: product.id,
+          productTitle: product.title,
+          variantTitle: variant.title,
+          sku: variant.sku,
+          quantity: newAvailable,
+          actionTaken: `[Webhook Trigger] ${actions.join(" & ")} on restock (${variantSummary})`,
+          status: restockErrors.length > 0 ? "FAILED" : "SUCCESS",
+          details: restockErrors.length > 0 ? restockErrors.join(" | ") : null,
+        });
+      })();
+    }
+
+    // 5. LOW STOCK — a drop that does not empty the variant (10 → 1) never crosses
+    // the zero boundary, so none of the branches above see it. It is still the
+    // event a merchant most wants to know about, and it is what the Low Stock Tag
+    // and Default Low Stock Safety Limit settings exist for.
+    //
+    // Evaluated independently of the transition type: a variant can come back into
+    // stock (0 → 2) and be below its limit in the same webhook.
+    const customThreshold =
+      customThresholds.find(
+        (t) => t.productId === product.id && String(t.variantId || "") === String(variant.id)
+      ) || customThresholds.find((t) => t.productId === product.id && !t.variantId);
+    const threshold = customThreshold
+      ? Number(customThreshold.minThreshold)
+      : Number(settings.defaultLowStockLimit) || 0;
+
+    const lowStockTag = settings.lowStockTag || "low-stock";
+    const productTags = Array.isArray(product.tags) ? product.tags : [];
+    const hasLowStockTag = productTags.includes(lowStockTag);
+
+    const lowStock = classifyLowStockTransition(transition, threshold);
+
+    if (lowStock.entered) {
+      const lowStockErrors = [];
+      const lowStockActions = [];
+
+      // Already tagged means a previous crossing handled it; re-tagging is noise.
+      if (settings.enableAutoTag !== false && !hasLowStockTag) {
         try {
           const tagRes = await admin.graphql(
             `#graphql
-              mutation tagsRemove($id: ID!, $tags: [String!]!) {
-                tagsRemove(id: $id, tags: $tags) {
+              mutation tagsAdd($id: ID!, $tags: [String!]!) {
+                tagsAdd(id: $id, tags: $tags) {
                   node { id }
                   userErrors { field message }
                 }
               }
             `,
-            { variables: { id: product.id, tags: [tagToRemove] } }
+            { variables: { id: product.id, tags: [lowStockTag] } }
           );
           const tagJson = await tagRes.json();
           const tagErrs = [
             ...(tagJson.errors || []).map((e) => e.message),
-            ...(tagJson.data?.tagsRemove?.userErrors || []).map((e) => e.message),
+            ...(tagJson.data?.tagsAdd?.userErrors || []).map((e) => e.message),
           ];
-          if (tagErrs.length > 0) restockErrors.push(...tagErrs);
-          else actions.push(`Removed tag '${tagToRemove}'`);
+          if (tagErrs.length > 0) lowStockErrors.push(...tagErrs);
+          else lowStockActions.push(`Applied tag '${lowStockTag}'`);
         } catch (tagErr) {
-          restockErrors.push(tagErr.message);
+          lowStockErrors.push(tagErr.message);
         }
       }
 
-      // Reverse only the visibility action that the configured mode would have taken
-      if (visibilityNeedsRestoring) {
-        const restored = await restoreProductVisibility(admin, {
-          productId: product.id,
-          visibilityMode: settings.visibilityMode,
-          shop,
-        });
-        if (restored.errors.length > 0) restockErrors.push(...restored.errors);
-        actions.push(`${restored.action} [${restored.mode}]`);
+      if (lowStockErrors.length > 0) {
+        console.error("[Webhook] Low stock tag errors:", lowStockErrors);
       }
 
-      if (restockErrors.length > 0) {
-        console.error("[Webhook] Error republishing restocked product:", restockErrors);
-      }
+      const summary =
+        lowStockErrors.length > 0
+          ? `Failed to apply tag '${lowStockTag}'`
+          : lowStockActions.length > 0
+          ? lowStockActions.join(" & ")
+          : settings.enableAutoTag === false
+          ? "Recorded low stock (auto-tag disabled)"
+          : `Recorded low stock (already tagged '${lowStockTag}')`;
+
+      console.log(
+        `[Webhook] ${product.title} / ${variant.title} is low on stock: ${newAvailable} ≤ threshold ${threshold}`
+      );
 
       logsToCreate.push({
         shop,
-        eventType: "RESTOCK",
+        eventType: "LOW_STOCK",
         productId: product.id,
         productTitle: product.title,
         variantTitle: variant.title,
         sku: variant.sku,
         quantity: newAvailable,
-        actionTaken: `[Webhook Trigger] ${actions.join(" & ")} on restock (${variantSummary})`,
-        status: restockErrors.length > 0 ? "FAILED" : "SUCCESS",
-        details: restockErrors.length > 0 ? restockErrors.join(" | ") : null,
+        actionTaken: `[Webhook Trigger] ${summary} — ${newAvailable} left, at or below the ${threshold}-unit limit (${describeTransition(transition)})`,
+        status: lowStockErrors.length > 0 ? "FAILED" : "SUCCESS",
+        details: lowStockErrors.length > 0 ? lowStockErrors.join(" | ") : null,
       });
+    }
+    // Back above the limit (or emptied, where the out-of-stock tag takes over): the
+    // low-stock tag no longer describes the variant, so it is withdrawn. Keyed off
+    // the tag rather than `lowStock.left` so a tag left behind by an earlier failure
+    // is still cleaned up.
+    else if (!lowStock.isLow && hasLowStockTag && settings.enableAutoTag !== false) {
+      try {
+        const tagRes = await admin.graphql(
+          `#graphql
+            mutation tagsRemove($id: ID!, $tags: [String!]!) {
+              tagsRemove(id: $id, tags: $tags) {
+                node { id }
+                userErrors { field message }
+              }
+            }
+          `,
+          { variables: { id: product.id, tags: [lowStockTag] } }
+        );
+        const tagJson = await tagRes.json();
+        const tagErrs = [
+          ...(tagJson.errors || []).map((e) => e.message),
+          ...(tagJson.data?.tagsRemove?.userErrors || []).map((e) => e.message),
+        ];
+        if (tagErrs.length > 0) console.error("[Webhook] Low stock tag removal errors:", tagErrs);
+
+        logsToCreate.push({
+          shop,
+          eventType: "LOW_STOCK",
+          productId: product.id,
+          productTitle: product.title,
+          variantTitle: variant.title,
+          sku: variant.sku,
+          quantity: newAvailable,
+          actionTaken:
+            newAvailable > 0
+              ? `[Webhook Trigger] Removed tag '${lowStockTag}' — back above the ${threshold}-unit limit`
+              : `[Webhook Trigger] Removed tag '${lowStockTag}' — variant is now out of stock`,
+          status: tagErrs.length > 0 ? "FAILED" : "SUCCESS",
+          details: tagErrs.length > 0 ? tagErrs.join(" | ") : null,
+        });
+      } catch (tagErr) {
+        console.error("[Webhook] Low stock tag removal error:", tagErr);
+      }
     }
 
     // Persist logs in database

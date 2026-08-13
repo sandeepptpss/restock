@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -6,7 +6,7 @@ import { getAutomationLogs } from "../models/inventory.server";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
-  const logs = await getAutomationLogs(session.shop, 100);
+  const logs = await getAutomationLogs(session.shop, 500);
   return { logs };
 };
 
@@ -14,6 +14,15 @@ export default function AutomationLogs() {
   const { logs } = useLoaderData();
   const [filterType, setFilterType] = useState("ALL");
   const [search, setSearch] = useState("");
+
+  // Pagination State
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Reset to Page 1 when filters or search change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterType, search, pageSize]);
 
   const filteredLogs = logs.filter((log) => {
     const matchesSearch =
@@ -26,6 +35,14 @@ export default function AutomationLogs() {
 
     return true;
   });
+
+  // Calculate Pagination Slices
+  const totalLogs = filteredLogs.length;
+  const totalPages = Math.max(1, Math.ceil(totalLogs / pageSize));
+  const validPage = Math.min(currentPage, totalPages);
+  const startIndex = totalLogs === 0 ? 0 : (validPage - 1) * pageSize + 1;
+  const endIndex = Math.min(validPage * pageSize, totalLogs);
+  const paginatedLogs = filteredLogs.slice((validPage - 1) * pageSize, validPage * pageSize);
 
   return (
     <div className="stock-container">
@@ -43,7 +60,7 @@ export default function AutomationLogs() {
       <div className="table-card">
         <div className="table-header">
           <div>
-            <h2 className="table-title">Activity Logs ({filteredLogs.length})</h2>
+            <h2 className="table-title">Activity Logs ({totalLogs})</h2>
             <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "var(--text-muted)" }}>
               Sorted by latest timestamp
             </p>
@@ -89,14 +106,14 @@ export default function AutomationLogs() {
             </tr>
           </thead>
           <tbody>
-            {filteredLogs.length === 0 ? (
+            {paginatedLogs.length === 0 ? (
               <tr>
                 <td colSpan={7} style={{ textAlign: "center", padding: "40px", color: "var(--text-muted)" }}>
                   No logs found matching your filters.
                 </td>
               </tr>
             ) : (
-              filteredLogs.map((log) => (
+              paginatedLogs.map((log) => (
                 <tr key={log.id}>
                   <td style={{ fontSize: "12px", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
                     {new Date(log.createdAt).toLocaleString()}
@@ -113,12 +130,16 @@ export default function AutomationLogs() {
                             ? "#fef2f2"
                             : log.eventType === "RESTOCK"
                             ? "#ecfdf5"
+                            : log.eventType === "LOW_STOCK"
+                            ? "#fffbeb"
                             : "#e0e7ff",
                         color:
                           log.eventType === "AUTO_HIDE"
                             ? "#991b1b"
                             : log.eventType === "RESTOCK"
                             ? "#065f46"
+                            : log.eventType === "LOW_STOCK"
+                            ? "#92400e"
                             : "#3730a3",
                       }}
                     >
@@ -146,6 +167,91 @@ export default function AutomationLogs() {
             )}
           </tbody>
         </table>
+
+        {/* PAGINATION FOOTER CONTROL BAR */}
+        <div
+          style={{
+            display: "flex",
+            justify: "space-between",
+            alignItems: "center",
+            padding: "16px 20px",
+            borderTop: "1px solid var(--border-color)",
+            background: "#f8fafc",
+            borderBottomLeftRadius: "12px",
+            borderBottomRightRadius: "12px",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
+          {/* Summary Text */}
+          <div style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>
+            Showing <strong>{startIndex}</strong> to <strong>{endIndex}</strong> of <strong>{totalLogs}</strong> activity logs
+          </div>
+
+          {/* Controls: Page Size & Navigation */}
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            {/* Page Size Selector */}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "var(--text-muted)" }}>
+              <span>Show:</span>
+              <select
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}
+                className="form-input"
+                style={{ padding: "4px 8px", fontSize: "13px", background: "#ffffff", borderRadius: "6px" }}
+              >
+                <option value={10}>10 / page</option>
+                <option value={25}>25 / page</option>
+                <option value={50}>50 / page</option>
+                <option value={100}>100 / page</option>
+              </select>
+            </div>
+
+            {/* Page Navigation Buttons */}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <button
+                className="btn-secondary"
+                disabled={validPage <= 1}
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                style={{
+                  padding: "6px 14px",
+                  fontSize: "13px",
+                  opacity: validPage <= 1 ? 0.5 : 1,
+                  cursor: validPage <= 1 ? "not-allowed" : "pointer",
+                }}
+              >
+                &larr; Previous
+              </button>
+
+              <span
+                style={{
+                  fontSize: "13px",
+                  fontWeight: "600",
+                  padding: "6px 12px",
+                  background: "#ffffff",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "6px",
+                  color: "#1e293b",
+                }}
+              >
+                Page {validPage} of {totalPages}
+              </span>
+
+              <button
+                className="btn-secondary"
+                disabled={validPage >= totalPages}
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                style={{
+                  padding: "6px 14px",
+                  fontSize: "13px",
+                  opacity: validPage >= totalPages ? 0.5 : 1,
+                  cursor: validPage >= totalPages ? "not-allowed" : "pointer",
+                }}
+              >
+                Next &rarr;
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
