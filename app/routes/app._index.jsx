@@ -197,15 +197,16 @@ export default function Dashboard() {
       {isBreached && (
         <div
           style={{
-            background: "linear-gradient(135deg, #fef2f2 0%, #fff1f2 100%)",
-            border: "1px solid #fca5a5",
+            background: "#ffffff",
+            border: "1px solid #fee2e2",
+            borderLeft: "4px solid #dc2626",
             borderRadius: "12px",
             padding: "16px 20px",
             marginBottom: "20px",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            boxShadow: "0 2px 8px rgba(220, 38, 38, 0.08)",
+            boxShadow: "var(--shadow-xs)",
             flexWrap: "wrap",
             gap: "12px",
           }}
@@ -213,25 +214,28 @@ export default function Dashboard() {
           <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
             <div
               style={{
-                width: "40px",
-                height: "40px",
+                width: "36px",
+                height: "36px",
                 borderRadius: "10px",
-                background: "#fee2e2",
+                background: "#fef2f2",
                 color: "#dc2626",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                fontWeight: "800",
-                fontSize: "18px",
+                flexShrink: 0,
               }}
             >
-              ⚠️
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
             </div>
             <div>
-              <h3 style={{ margin: "0 0 2px 0", fontSize: "15px", color: "#991b1b", fontWeight: "700" }}>
+              <h3 style={{ margin: "0 0 2px 0", fontSize: "14px", color: "#0f172a", fontWeight: "700" }}>
                 Product Limit Exceeded
               </h3>
-              <p style={{ margin: 0, fontSize: "13px", color: "#7f1d1d" }}>
+              <p style={{ margin: 0, fontSize: "12px", color: "#64748b" }}>
                 {promptMessage} Existing protected items remain active while you upgrade.
               </p>
             </div>
@@ -243,9 +247,9 @@ export default function Dashboard() {
               background: "#dc2626",
               color: "#ffffff",
               textDecoration: "none",
-              padding: "8px 18px",
-              fontSize: "13px",
-              fontWeight: "700",
+              padding: "7px 16px",
+              fontSize: "12px",
+              fontWeight: "600",
               borderRadius: "8px",
             }}
           >
@@ -258,37 +262,76 @@ export default function Dashboard() {
       {criticalItems.length > 0 && (
         <div
           style={{
-            background: "#fff1f2",
-            border: "1px solid #fecdd3",
-            borderRadius: "10px",
-            padding: "12px 18px",
+            background: "#ffffff",
+            border: "1px solid #fee2e2",
+            borderLeft: "4px solid #ef4444",
+            borderRadius: "12px",
+            padding: "14px 20px",
             marginBottom: "20px",
             display: "flex",
-            justify: "space-between",
+            justifyContent: "space-between",
             alignItems: "center",
+            boxShadow: "var(--shadow-xs)",
+            flexWrap: "wrap",
+            gap: "12px",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div
+              style={{
+                width: "36px",
+                height: "36px",
+                borderRadius: "10px",
+                background: "#fef2f2",
+                color: "#dc2626",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+            </div>
             <div>
-              <span style={{ color: "#9f1239", fontWeight: "700", fontSize: "14px" }}>
-                {criticalItems.length} Product(s) Currently Out of Stock
-              </span>
-              <span style={{ color: "#be123c", fontSize: "12px", marginLeft: "10px" }}>
-                Auto-hide rules active. Product status set to {settings.visibilityMode}.
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                <span style={{ color: "#0f172a", fontWeight: "700", fontSize: "14px" }}>
+                  {criticalItems.length} Product{criticalItems.length > 1 ? "s" : ""} Currently Out of Stock
+                </span>
+                <span
+                  style={{
+                    background: "#fef2f2",
+                    color: "#dc2626",
+                    border: "1px solid #fecaca",
+                    fontSize: "11px",
+                    fontWeight: "600",
+                    padding: "2px 8px",
+                    borderRadius: "12px",
+                  }}
+                >
+                  Auto-Hide Active
+                </span>
+              </div>
+              <p style={{ margin: "2px 0 0 0", color: "#64748b", fontSize: "12px" }}>
+                Auto-hide rules active. Product status set to <strong style={{ color: "#334155" }}>{settings.visibilityMode}</strong>.
+              </p>
             </div>
           </div>
           <button
             onClick={() => setStatusFilter("CRITICAL")}
             style={{
-              background: "#e11d48",
+              background: "#0f172a",
               color: "#ffffff",
-              border: "none",
-              padding: "6px 14px",
-              borderRadius: "6px",
+              border: "1px solid #0f172a",
+              padding: "7px 16px",
+              borderRadius: "8px",
               fontSize: "12px",
               fontWeight: "600",
               cursor: "pointer",
+              transition: "all 0.15s ease",
             }}
           >
             Filter Out-of-Stock
