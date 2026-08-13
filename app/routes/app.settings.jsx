@@ -185,6 +185,12 @@ export default function Settings() {
 
   const [activeTab, setActiveTab] = useState(initialTab || "general");
 
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
+
   const currentPlan = fetcher.data?.subscription?.plan || loaderSub?.plan || "GROWTH";
   const [selectedPlan, setSelectedPlan] = useState(currentPlan);
 

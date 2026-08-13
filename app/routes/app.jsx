@@ -21,6 +21,7 @@ export default function App() {
         <s-link href="/app/inventory">Stock Radar</s-link>
         <s-link href="/app/logs">Activity Logs</s-link>
         <s-link href="/app/settings">Settings</s-link>
+        <s-link href="/app/settings?tab=billing">Plan</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
