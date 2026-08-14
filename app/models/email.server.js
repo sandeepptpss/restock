@@ -63,7 +63,7 @@ export async function sendMerchantInventoryEmail(
     await createAutomationLog({
       shop,
       eventType: "EMAIL_ALERT",
-      productId: productId || "N/A",
+      productId: productId || "",
       productTitle: productTitle || "Unknown Product",
       variantId,
       variantTitle: variantTitle || "Default Variant",
@@ -90,6 +90,8 @@ export async function sendMerchantInventoryEmail(
       const existingLog = await AutomationLog.findOne({
         shop,
         eventType: "EMAIL_ALERT",
+        // The same `|| ""` fallbacks the log entries below are written with, so
+        // an alert that carries no product id can still find its own history.
         productId: productId || "",
         // Entries written before variantId existed have "", which still matches
         // a single-variant product's alerts.
@@ -221,7 +223,7 @@ export async function sendMerchantInventoryEmail(
       await createAutomationLog({
         shop,
         eventType: "EMAIL_ALERT",
-        productId: productId || "N/A",
+        productId: productId || "",
         productTitle,
         variantId,
         variantTitle,
@@ -237,7 +239,7 @@ export async function sendMerchantInventoryEmail(
       await createAutomationLog({
         shop,
         eventType: "EMAIL_ALERT",
-        productId: productId || "N/A",
+        productId: productId || "",
         productTitle,
         variantId,
         variantTitle,
@@ -253,7 +255,7 @@ export async function sendMerchantInventoryEmail(
     await createAutomationLog({
       shop,
       eventType: "EMAIL_ALERT",
-      productId: productId || "N/A",
+      productId: productId || "",
       productTitle,
       variantId,
       variantTitle,

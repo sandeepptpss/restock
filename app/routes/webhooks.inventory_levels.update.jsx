@@ -13,6 +13,7 @@ import {
   calculateDelayMs,
   classifyInventoryTransition,
   classifyLowStockTransition,
+  observeVariantQuantity,
   resolveVariantThreshold,
   anyVariantLowOnStock,
   describeTransition,
@@ -238,6 +239,17 @@ export const action = async ({ request }) => {
           changedVariantQuantity
         )
       : classifyInventoryTransition(null, changedVariantQuantity);
+
+    // The scan reads the same per-variant totals and alerts on them crossing
+    // zero, so the quantity this webhook has just acted on is recorded as the
+    // app's latest observation. Without it the next scan would rediscover this
+    // very change and mail the merchant about it a second time.
+    await observeVariantQuantity(shop, {
+      productId: product.id,
+      variantId: variant.id,
+      inventoryItemId: invData.id,
+      quantity: changedVariantQuantity,
+    });
 
     // With more variants than one page holds we cannot prove they are all empty,
     // so the product is never hidden on partial data.

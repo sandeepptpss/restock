@@ -341,7 +341,7 @@ export default function Dashboard() {
             </div>
           </div>
           <a
-            href="/app/settings?tab=billing"
+            href="/app/plan"
             className="btn-primary"
             style={{
               background: "#dc2626",

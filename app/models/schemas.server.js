@@ -217,6 +217,34 @@ scheduledRestockSchema.index({ status: 1, scheduledAt: 1 });
 // sweep have to be able to select one variant's jobs out of a product's.
 scheduledRestockSchema.index({ shop: 1, productId: 1, variantId: 1, status: 1 });
 
+/**
+ * VariantStockState — the last quantity the app observed for one variant.
+ *
+ * The webhook learns a transition from the previous InventoryEvent, but those
+ * rows are per inventory item *per location* and only exist when a webhook was
+ * actually delivered. The catalogue scan sees neither: it reads a variant's
+ * total across locations, and it is the path that keeps running when webhook
+ * delivery is broken. Without a remembered quantity it can only see that a
+ * variant *is* empty, never that it just emptied or just came back — which is
+ * why restock notifications depended on the app happening to untag or republish
+ * a product, and never fired for a variant of a product that stayed listed.
+ *
+ * One document per variant, updated by every path that observes a quantity, so
+ * a transition is detected exactly once no matter which path sees it first.
+ */
+const variantStockStateSchema = new Schema(
+  {
+    shop: { type: String, required: true },
+    productId: { type: String, default: "" },
+    variantId: { type: String, required: true },
+    inventoryItemId: { type: String, default: "" },
+    quantity: { type: Number, required: true },
+    observedAt: { type: Date, default: Date.now },
+  },
+  { timestamps: { createdAt: true, updatedAt: true }, collection: "variantstockstates" }
+);
+variantStockStateSchema.index({ shop: 1, variantId: 1 }, { unique: true });
+
 const supportTicketSchema = new Schema(
   {
     shop: { type: String, required: true },
@@ -233,7 +261,31 @@ const supportTicketSchema = new Schema(
 );
 supportTicketSchema.index({ shop: 1, createdAt: -1 });
 
-const model = (name, schema) => mongoose.models[name] || mongoose.model(name, schema);
+/**
+ * Register a model, replacing one that an earlier evaluation of this file left
+ * behind with a now-outdated schema.
+ *
+ * `mongoose.models` lives on the singleton mongoose instance, so a dev-server
+ * hot reload re-runs this module but keeps the model compiled from the *old*
+ * schema. Every path added since then is then dropped on write (strict mode)
+ * and stripped from queries (`strictQuery`), both silently. That is how
+ * `variantId` stopped being stored on automation logs, which in turn collapsed
+ * the per-variant email de-duplication into a per-product one and suppressed
+ * every other variant's alert.
+ */
+const model = (name, schema) => {
+  const cached = mongoose.models[name];
+  if (!cached) return mongoose.model(name, schema);
+
+  const missingPath = Object.keys(schema.paths).find((path) => !cached.schema.paths[path]);
+  if (!missingPath) return cached;
+
+  console.warn(
+    `[schemas] Recompiling the ${name} model — the registered one predates '${missingPath}'`
+  );
+  mongoose.deleteModel(name);
+  return mongoose.model(name, schema);
+};
 
 export const Session = model("Session", sessionSchema);
 export const InventorySettings = model("InventorySettings", inventorySettingsSchema);
@@ -243,4 +295,5 @@ export const InventoryEvent = model("InventoryEvent", inventoryEventSchema);
 export const AutomationLog = model("AutomationLog", automationLogSchema);
 export const Subscription = model("Subscription", subscriptionSchema);
 export const ScheduledRestock = model("ScheduledRestock", scheduledRestockSchema);
+export const VariantStockState = model("VariantStockState", variantStockStateSchema);
 export const SupportTicket = model("SupportTicket", supportTicketSchema);

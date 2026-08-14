@@ -10,6 +10,7 @@ import {
   Session,
   Subscription,
   SupportTicket,
+  VariantStockState,
   plain,
   plainAll,
 } from "./schemas.server";
@@ -27,10 +28,12 @@ const VELOCITY_WINDOW_DAYS = 30;
 const MIN_VELOCITY_OBSERVATION_DAYS = 3;
 
 // How long a scan-triggered alert suppresses the next identical one for the same
-// variant. The catalogue scan re-observes the same standing stockout on every
-// run, so unlike the webhook — which only fires on a real change — it needs a
-// window measured in hours rather than seconds.
-const SCAN_ALERT_DEDUPE_MS = Number(process.env.SCAN_ALERT_DEDUPE_MS) || 6 * 60 * 60 * 1000;
+// variant. The scan only alerts on a remembered quantity actually crossing zero
+// (see observeVariantQuantity), so a standing stockout no longer re-alerts on
+// every run and this window only has to cover two overlapping scans or a scan
+// racing the webhook over the same change. The six-hour window it replaces was
+// wide enough to swallow a genuine second stockout for the rest of the morning.
+const SCAN_ALERT_DEDUPE_MS = Number(process.env.SCAN_ALERT_DEDUPE_MS) || 10 * 60 * 1000;
 
 /**
  * Run a GraphQL request, backing off and retrying when Shopify throttles us.
@@ -175,6 +178,7 @@ export async function deleteShopData(shop) {
     ["scheduledRestock", ScheduledRestock],
     ["automationLog", AutomationLog],
     ["inventoryEvent", InventoryEvent],
+    ["variantStockState", VariantStockState],
     ["automationRule", AutomationRule],
     ["productThreshold", ProductThreshold],
     ["inventorySettings", InventorySettings],
@@ -468,6 +472,97 @@ export async function recordInventoryEvent(shop, params) {
       transition: classifyInventoryTransition(null, newQuantity),
     };
   }
+}
+
+/**
+ * Record the quantity a variant is observed to hold and report how it changed
+ * since the app last saw it.
+ *
+ * This is the scan's equivalent of the previous-quantity lookup the webhook gets
+ * from InventoryEvent, and the two deliberately share one row per variant: every
+ * path that observes a quantity writes here, so a change is only ever a
+ * transition for whichever path notices it first. Without that, a stockout the
+ * webhook already alerted on would be re-discovered by the next scan and mailed
+ * out a second time.
+ *
+ * The read and the write are a single atomic findOneAndUpdate returning the
+ * pre-update document, so two scans running at once cannot both see the old
+ * quantity and both alert.
+ *
+ * `isFirstObservation` is true when the app has never recorded this variant.
+ * Callers must not alert on it: the current state is known but the change that
+ * produced it is not, and treating it as a transition would mail the merchant
+ * about every empty variant in the catalogue the first time this runs.
+ */
+export async function observeVariantQuantity(
+  shop,
+  { productId, variantId, inventoryItemId, quantity }
+) {
+  const newQuantity = Number(quantity) || 0;
+  if (!isDbConfigured() || !shop || !variantId) {
+    return {
+      transition: classifyInventoryTransition(null, newQuantity),
+      isFirstObservation: true,
+      recorded: false,
+    };
+  }
+
+  try {
+    await tryConnectDB();
+    const previous = await VariantStockState.findOneAndUpdate(
+      { shop, variantId: String(variantId) },
+      {
+        $set: {
+          productId: productId ? String(productId) : "",
+          inventoryItemId: inventoryItemId ? String(inventoryItemId) : "",
+          quantity: newQuantity,
+          observedAt: new Date(),
+        },
+      },
+      { upsert: true, returnDocument: "before", projection: { quantity: 1 } }
+    ).lean();
+
+    const isFirstObservation = !previous;
+    return {
+      transition: classifyInventoryTransition(
+        isFirstObservation ? null : previous.quantity,
+        newQuantity
+      ),
+      isFirstObservation,
+      recorded: true,
+    };
+  } catch (err) {
+    // Reported as a first observation, which is the one outcome that never
+    // triggers an alert — a tracking failure must not invent a transition.
+    console.warn(`[observeVariantQuantity] Could not record ${variantId} for ${shop}:`, err.message);
+    return {
+      transition: classifyInventoryTransition(null, newQuantity),
+      isFirstObservation: true,
+      recorded: false,
+    };
+  }
+}
+
+/**
+ * Every quantity the app has recorded for a shop, as variantId -> quantity.
+ *
+ * A scan walks the whole catalogue, and almost every variant it sees is exactly
+ * where it left it. Reading the shop's observations once lets it skip the write
+ * for those and call observeVariantQuantity only where something moved.
+ */
+export async function getVariantStockStates(shop) {
+  const states = new Map();
+  if (!isDbConfigured() || !shop) return states;
+  try {
+    await tryConnectDB();
+    const rows = await VariantStockState.find({ shop }, { variantId: 1, quantity: 1 }).lean();
+    for (const row of rows) states.set(String(row.variantId), row.quantity);
+  } catch (err) {
+    // An empty map only costs a redundant observation per variant, which is
+    // idempotent — never a wrong alert.
+    console.warn(`[getVariantStockStates] Could not load observations for ${shop}:`, err.message);
+  }
+  return states;
 }
 
 /**
@@ -869,6 +964,14 @@ export async function runStockoutAutomationScan(admin, shop) {
     };
   }
 
+  // Loaded lazily: email.server imports back into this module for its audit
+  // logging, so a static import would close the cycle.
+  const { sendMerchantInventoryEmail } = await import("./email.server.js");
+
+  // What the app last saw each variant holding, read in one go so the loop below
+  // only writes for the variants that actually moved.
+  const lastObserved = await getVariantStockStates(shop);
+
   // Group items by product to enforce Variant Strategy (e.g., HIDE_ALL_OOS)
   const productGroupMap = new Map();
   for (const item of items) {
@@ -906,7 +1009,66 @@ export async function runStockoutAutomationScan(admin, shop) {
     const stockedVariants = productItems.filter((i) => i.inventoryQuantity > 0);
     const variantSummary = `${stockedVariants.length}/${productItems.length} variants in stock`;
 
-    // 0. PER-VARIANT RECOVERY — runs whatever the product-level decision is.
+    // 0. MERCHANT NOTIFICATIONS — driven by what actually changed since the app
+    // last observed each variant, not by what the automation happened to do
+    // about it.
+    //
+    // Both alerts used to ride on other work: the stockout mail on a newly
+    // queued auto-fill job, the restock mail on the app removing the
+    // out-of-stock tag or republishing the product. So a variant of a product
+    // that was never hidden — the normal case under HIDE_ALL_OOS, where one
+    // stocked sibling keeps the product listed — was mailed about when it
+    // emptied and never mentioned again when it came back. Restock alerts also
+    // disappeared entirely whenever auto-fill, auto-tag or auto-publish was off,
+    // while stockout alerts kept arriving.
+    for (const item of productItems) {
+      // Sitting exactly where the app left it, which is the usual case for most
+      // of a catalogue: nothing crossed zero, so there is nothing to record.
+      if (lastObserved.get(String(item.variantId)) === item.inventoryQuantity) continue;
+
+      const observed = await observeVariantQuantity(shop, {
+        productId,
+        variantId: item.variantId,
+        inventoryItemId: item.inventoryItemId,
+        quantity: item.inventoryQuantity,
+      });
+
+      // Nothing crossed zero, or this is the first time the app has seen the
+      // variant at all — its current state is known, the change that produced
+      // it is not.
+      if (observed.isFirstObservation || observed.transition.type === INVENTORY_TRANSITION.NONE) {
+        continue;
+      }
+
+      const isStockout = observed.transition.type === INVENTORY_TRANSITION.STOCKOUT;
+      console.log(
+        `[Scan] ${item.productTitle} / ${item.variantTitle}: ${describeTransition(observed.transition)}`
+      );
+
+      if (settings.enableEmailAlerts === false) continue;
+      if (isStockout ? settings.notifyOnStockout === false : settings.notifyOnRestock === false) {
+        continue;
+      }
+
+      alertsCount++;
+      await sendMerchantInventoryEmail(shop, {
+        eventType: isStockout ? "STOCKOUT" : "RESTOCK",
+        productId,
+        productTitle: item.productTitle,
+        variantTitle: item.variantTitle,
+        variantId: item.variantId,
+        sku: item.sku,
+        quantity: item.inventoryQuantity,
+        settings,
+        // Covers two scans overlapping, or a scan reaching the same change a
+        // moment after the webhook already alerted on it.
+        dedupeWindowMs: SCAN_ALERT_DEDUPE_MS,
+      }).catch((emailErr) =>
+        console.error(`[Scan] ${isStockout ? "Stockout" : "Restock"} email alert error:`, emailErr)
+      );
+    }
+
+    // 0a. PER-VARIANT RECOVERY — runs whatever the product-level decision is.
     //
     // Hiding is a product-level action and rightly waits for the configured
     // Variant Stockout Condition, but auto-fill is a *variant* action: an empty
@@ -949,28 +1111,6 @@ export async function runStockoutAutomationScan(admin, shop) {
               actionTaken: `Variant out of stock — auto-fill to ${settings.enableAutoFill ? settings.autoFillQuantity : 0} units scheduled (${variantSummary})`,
               status: "SUCCESS",
             });
-
-            if (settings.enableEmailAlerts !== false && settings.notifyOnStockout !== false) {
-              import("./email.server.js")
-                .then(({ sendMerchantInventoryEmail }) =>
-                  sendMerchantInventoryEmail(shop, {
-                    eventType: "STOCKOUT",
-                    productId,
-                    productTitle: item.productTitle,
-                    variantTitle: item.variantTitle,
-                    variantId: item.variantId,
-                    sku: item.sku,
-                    quantity: 0,
-                    settings,
-                    // A scan reconciles state rather than reacting to an event,
-                    // so it uses a much wider suppression window than the
-                    // webhook: a cron running every minute must not send a
-                    // stockout mail every minute.
-                    dedupeWindowMs: SCAN_ALERT_DEDUPE_MS,
-                  })
-                )
-                .catch((emailErr) => console.error("[Scan] Variant stockout email error:", emailErr));
-            }
           }
         } catch (schedErr) {
           console.error(`[Scan] Error scheduling auto-fill for ${item.productTitle} / ${item.variantTitle}:`, schedErr);
@@ -1181,23 +1321,9 @@ export async function runStockoutAutomationScan(admin, shop) {
         });
       }
 
-      if (outOfStockTagRemoved || (settings.enableAutoPublish && needsRestore)) {
-        if (settings.enableEmailAlerts !== false && settings.notifyOnRestock !== false) {
-          import("./email.server.js").then(({ sendMerchantInventoryEmail }) => {
-            sendMerchantInventoryEmail(shop, {
-              eventType: "RESTOCK",
-              productId,
-              productTitle: recoveredVariant.productTitle,
-              variantId: recoveredVariant.variantId,
-              variantTitle: recoveredVariant.variantTitle,
-              sku: recoveredVariant.sku,
-              quantity: recoveredVariant.inventoryQuantity,
-              settings,
-              dedupeWindowMs: SCAN_ALERT_DEDUPE_MS,
-            }).catch((emailErr) => console.error("[Scan] Restock email alert error:", emailErr));
-          });
-        }
-      }
+      // The restock alert is not sent from here any more: it belongs to the
+      // variant coming back into stock, which step 0 detects whether or not
+      // there was a tag to remove or a product to republish.
     }
 
 
@@ -2629,6 +2755,19 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
     status: warnings.length > 0 ? "PARTIAL" : "SUCCESS",
     details: warnings.length > 0 ? warnings.join(" | ") : null,
   });
+
+  // The fill this job just performed is the restock, and it is announced here.
+  // Recording the new quantity first means the catalogue scan sees it as the
+  // state it already knows about rather than as a fresh 0 → N transition, so the
+  // merchant is not told about the same restock twice.
+  if (didAutoFill && variantId) {
+    await observeVariantQuantity(shop, {
+      productId,
+      variantId,
+      inventoryItemId,
+      quantity: record.targetQuantity,
+    });
+  }
 
   if (settings.enableEmailAlerts !== false && settings.notifyOnRestock !== false) {
     import("./email.server.js").then(({ sendMerchantInventoryEmail }) => {
