@@ -564,155 +564,453 @@ export default function Settings() {
 
       {/* TAB 2: BILLING & PLANS */}
       {activeTab === "billing" && (
-        <div className="table-card" style={{ padding: "24px" }}>
-          <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#312e81" }}>
-            Merchant Billing &amp; Subscription Plans
-          </h2>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px" }}>
-            {/* Free Tier */}
-            <div
-              style={{
-                border: selectedPlan === "FREE" ? "2px solid #6366f1" : "1px solid var(--border-color)",
-                borderRadius: "12px",
-                padding: "20px",
-                background: selectedPlan === "FREE" ? "#f5f3ff" : "#ffffff",
-                transition: "all 0.2s ease",
-              }}
-            >
-              <h3 style={{ margin: "0 0 8px 0", fontSize: "16px" }}>Starter / Free</h3>
-              <div style={{ fontSize: "24px", fontWeight: "700", color: "#312e81", marginBottom: "12px" }}>
-                $0 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
+        <div>
+          {/* Active Plan Summary Banner */}
+          <div
+            className="table-card"
+            style={{
+              padding: "20px 24px",
+              marginBottom: "24px",
+              background: "linear-gradient(135deg, #312e81 0%, #1e1b4b 100%)",
+              color: "#ffffff",
+              borderRadius: "14px",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: "16px",
+            }}
+          >
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
+                <span
+                  style={{
+                    background: "rgba(255, 255, 255, 0.15)",
+                    color: "#60a5fa",
+                    padding: "3px 10px",
+                    borderRadius: "20px",
+                    fontSize: "11px",
+                    fontWeight: "700",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.5px",
+                  }}
+                >
+                  Active Subscription
+                </span>
+                <h3 style={{ margin: 0, fontSize: "18px", color: "#ffffff", fontWeight: "700" }}>
+                  {selectedPlan === "FREE" && "Starter / Free Plan ($0/mo)"}
+                  {selectedPlan === "GROWTH" && "Growth Plan ($3.99/mo)"}
+                  {selectedPlan === "PRO" && "Pro Plan ($15.99/mo)"}
+                  {selectedPlan === "ENTERPRISE" && "Enterprise Plan ($29.99/mo)"}
+                </h3>
               </div>
-              <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px" }}>
-                Basic automation and limited product volume
+              <p style={{ margin: 0, fontSize: "13px", color: "#cbd5e1" }}>
+                {selectedPlan === "FREE" && "Up to 50 active items with basic tagging. Upgrade anytime to unlock automated hiding & restock delays."}
+                {selectedPlan === "GROWTH" && "Up to 500 active items with auto-hiding, tagging, and restock delay automation."}
+                {selectedPlan === "PRO" && "Up to 5,000 items with AI Stockout Radar, storefront widget, & safety stock buffer rules."}
+                {selectedPlan === "ENTERPRISE" && "Unlimited item capacity with custom vendor rules, dedicated support, and webhook triggers."}
               </p>
-              <ul style={{ fontSize: "12px", paddingLeft: "16px", margin: "0 0 16px 0", lineHeight: "1.6" }}>
-                <li>Up to 50 active items</li>
-                <li>Basic Out-of-Stock tagging</li>
-                <li>Manual sync triggers</li>
-              </ul>
-              <button
-                onClick={() => handlePlanSelect("FREE")}
-                className="btn-secondary"
-                disabled={isChangingPlan}
-                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
-              >
-                {isChangingPlan && targetPlan === "FREE"
-                  ? "Switching Plan..."
-                  : selectedPlan === "FREE"
-                  ? "Current Active Plan"
-                  : "Select Free"}
-              </button>
             </div>
 
-            {/* Growth Tier */}
-            <div
-              style={{
-                border: selectedPlan === "GROWTH" ? "2px solid #6366f1" : "1px solid var(--border-color)",
-                borderRadius: "12px",
-                padding: "20px",
-                background: selectedPlan === "GROWTH" ? "#f5f3ff" : "#ffffff",
-                transition: "all 0.2s ease",
-              }}
-            >
-              <h3 style={{ margin: "0 0 8px 0", fontSize: "16px" }}>Growth</h3>
-              <div style={{ fontSize: "24px", fontWeight: "700", color: "#312e81", marginBottom: "12px" }}>
-                $3.99 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
-              </div>
-              <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px" }}>
-                Small stores and core automation
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <span style={{ fontSize: "12px", background: "rgba(16, 185, 129, 0.2)", color: "#34d399", padding: "6px 14px", borderRadius: "8px", border: "1px solid rgba(52, 211, 153, 0.3)", fontWeight: "600" }}>
+                ✓ Shopify Billing Active
+              </span>
+            </div>
+          </div>
+
+          {/* Subscription Plans Grid */}
+          <div className="table-card" style={{ padding: "24px", marginBottom: "24px" }}>
+            <div style={{ marginBottom: "20px" }}>
+              <h2 style={{ fontSize: "18px", margin: "0 0 6px 0", color: "#312e81" }}>
+                Select the Best Plan for Your Store
+              </h2>
+              <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
+                Transparent pricing tailored to catalog size &amp; inventory automation needs. All paid plans include a 7-day free trial on Shopify.
               </p>
-              <ul style={{ fontSize: "12px", paddingLeft: "16px", margin: "0 0 16px 0", lineHeight: "1.6" }}>
-                <li>Up to 500 active items</li>
-                <li>Auto-Hiding &amp; Tagging</li>
-                <li>Dynamic restock delays</li>
-              </ul>
-              <button
-                onClick={() => handlePlanSelect("GROWTH")}
-                className="btn-primary"
-                disabled={isChangingPlan}
-                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
-              >
-                {isChangingPlan && targetPlan === "GROWTH"
-                  ? "Processing..."
-                  : selectedPlan === "GROWTH"
-                  ? "Current Active Plan"
-                  : "Upgrade to Growth"}
-              </button>
             </div>
 
-            {/* Pro Tier */}
-            <div
-              style={{
-                border: selectedPlan === "PRO" ? "2px solid #6366f1" : "1px solid var(--border-color)",
-                borderRadius: "12px",
-                padding: "20px",
-                background: selectedPlan === "PRO" ? "#f5f3ff" : "#ffffff",
-                transition: "all 0.2s ease",
-              }}
-            >
-              <h3 style={{ margin: "0 0 8px 0", fontSize: "16px" }}>Pro</h3>
-              <div style={{ fontSize: "24px", fontWeight: "700", color: "#312e81", marginBottom: "12px" }}>
-                $15.99 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
-              </div>
-              <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px" }}>
-                Growing stores with larger catalogs
-              </p>
-              <ul style={{ fontSize: "12px", paddingLeft: "16px", margin: "0 0 16px 0", lineHeight: "1.6" }}>
-                <li>Up to 5,000 items</li>
-                <li>All Growth features</li>
-                <li>Stockout Risk Radar</li>
-              </ul>
-              <button
-                onClick={() => handlePlanSelect("PRO")}
-                className="btn-secondary"
-                disabled={isChangingPlan}
-                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "20px" }}>
+              {/* Free Tier */}
+              <div
+                style={{
+                  border: selectedPlan === "FREE" ? "2px solid #4f46e5" : "1px solid var(--border-color)",
+                  borderRadius: "14px",
+                  padding: "22px",
+                  background: selectedPlan === "FREE" ? "#f5f3ff" : "#ffffff",
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "space-between",
+                  position: "relative",
+                  boxShadow: selectedPlan === "FREE" ? "0 4px 14px rgba(79, 70, 229, 0.12)" : "none",
+                  transition: "all 0.2s ease",
+                }}
               >
-                {isChangingPlan && targetPlan === "PRO"
-                  ? "Processing..."
-                  : selectedPlan === "PRO"
-                  ? "Current Active Plan"
-                  : "Upgrade to Pro"}
-              </button>
-            </div>
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", background: "#f1f5f9", color: "#475569", padding: "3px 8px", borderRadius: "12px" }}>
+                      STARTER
+                    </span>
+                    {selectedPlan === "FREE" && (
+                      <span style={{ fontSize: "11px", fontWeight: "700", background: "#4f46e5", color: "#ffffff", padding: "3px 8px", borderRadius: "12px" }}>
+                        CURRENT PLAN
+                      </span>
+                    )}
+                  </div>
+                  <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Starter / Free</h3>
+                  <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
+                    $0 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                  </div>
+                  <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
+                    Ideal for brand new micro stores starting out with basic tagging requirements.
+                  </p>
 
-            {/* Enterprise Tier */}
-            <div
-              style={{
-                border: selectedPlan === "ENTERPRISE" ? "2px solid #6366f1" : "1px solid var(--border-color)",
-                borderRadius: "12px",
-                padding: "20px",
-                background: selectedPlan === "ENTERPRISE" ? "#f5f3ff" : "#ffffff",
-                transition: "all 0.2s ease",
-              }}
-            >
-              <h3 style={{ margin: "0 0 8px 0", fontSize: "16px" }}>Enterprise</h3>
-              <div style={{ fontSize: "24px", fontWeight: "700", color: "#312e81", marginBottom: "12px" }}>
-                $29.99 <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>/mo</span>
+                  <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
+                    <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Up to <strong>50 active products</strong>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Basic out-of-stock tagging
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Manual inventory sync triggers
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> 7 days activity audit logs
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#94a3b8", fontWeight: "bold" }}>✓</span> Standard community support
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => handlePlanSelect("FREE")}
+                  className="btn-secondary"
+                  disabled={isChangingPlan}
+                  style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
+                >
+                  {isChangingPlan && targetPlan === "FREE"
+                    ? "Switching Plan..."
+                    : selectedPlan === "FREE"
+                    ? "Current Active Plan"
+                    : "Select Free Plan"}
+                </button>
               </div>
-              <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px" }}>
-                High-volume stores and unlimited items
-              </p>
-              <ul style={{ fontSize: "12px", paddingLeft: "16px", margin: "0 0 16px 0", lineHeight: "1.6" }}>
-                <li>Unlimited active items</li>
-                <li>Priority support</li>
-                <li>Custom lead-time rules</li>
-              </ul>
-              <button
-                onClick={() => handlePlanSelect("ENTERPRISE")}
-                className="btn-secondary"
-                disabled={isChangingPlan}
-                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
+
+              {/* Growth Tier */}
+              <div
+                style={{
+                  border: selectedPlan === "GROWTH" ? "2px solid #4f46e5" : "1px solid #c7d2fe",
+                  borderRadius: "14px",
+                  padding: "22px",
+                  background: selectedPlan === "GROWTH" ? "#f5f3ff" : "#ffffff",
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "space-between",
+                  position: "relative",
+                  boxShadow: selectedPlan === "GROWTH" ? "0 4px 14px rgba(79, 70, 229, 0.12)" : "0 2px 8px rgba(0,0,0,0.04)",
+                  transition: "all 0.2s ease",
+                }}
               >
-                {isChangingPlan && targetPlan === "ENTERPRISE"
-                  ? "Processing..."
-                  : selectedPlan === "ENTERPRISE"
-                  ? "Current Active Plan"
-                  : "Upgrade to Enterprise"}
-              </button>
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", background: "#e0e7ff", color: "#3730a3", padding: "3px 8px", borderRadius: "12px" }}>
+                      MOST POPULAR
+                    </span>
+                    {selectedPlan === "GROWTH" && (
+                      <span style={{ fontSize: "11px", fontWeight: "700", background: "#4f46e5", color: "#ffffff", padding: "3px 8px", borderRadius: "12px" }}>
+                        CURRENT PLAN
+                      </span>
+                    )}
+                  </div>
+                  <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Growth Plan</h3>
+                  <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
+                    $3.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                  </div>
+                  <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
+                    Best value for growing SMB stores wanting core automation &amp; auto-hiding.
+                  </p>
+
+                  <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
+                    <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Up to <strong>500 active products</strong>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Auto-hiding out-of-stock items
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Auto-publishing back in stock
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Dynamic restock delay rules
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> 30 days activity audit logs
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Standard email support
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => handlePlanSelect("GROWTH")}
+                  className="btn-primary"
+                  disabled={isChangingPlan}
+                  style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", background: "#4f46e5", opacity: isChangingPlan ? 0.7 : 1 }}
+                >
+                  {isChangingPlan && targetPlan === "GROWTH"
+                    ? "Processing..."
+                    : selectedPlan === "GROWTH"
+                    ? "Current Active Plan"
+                    : "Upgrade to Growth"}
+                </button>
+              </div>
+
+              {/* Pro Tier */}
+              <div
+                style={{
+                  border: selectedPlan === "PRO" ? "2px solid #4f46e5" : "1px solid #fed7aa",
+                  borderRadius: "14px",
+                  padding: "22px",
+                  background: selectedPlan === "PRO" ? "#f5f3ff" : "#ffffff",
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "space-between",
+                  position: "relative",
+                  boxShadow: selectedPlan === "PRO" ? "0 4px 14px rgba(79, 70, 229, 0.12)" : "0 2px 8px rgba(0,0,0,0.04)",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", background: "#ffedd5", color: "#c2410c", padding: "3px 8px", borderRadius: "12px" }}>
+                      BEST VALUE
+                    </span>
+                    {selectedPlan === "PRO" && (
+                      <span style={{ fontSize: "11px", fontWeight: "700", background: "#4f46e5", color: "#ffffff", padding: "3px 8px", borderRadius: "12px" }}>
+                        CURRENT PLAN
+                      </span>
+                    )}
+                  </div>
+                  <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Pro Plan</h3>
+                  <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
+                    $15.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                  </div>
+                  <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
+                    For expanding stores needing intelligence, Stockout Risk Radar &amp; theme widgets.
+                  </p>
+
+                  <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
+                    <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Up to <strong>5,000 active items</strong>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> <strong>Everything in Growth</strong>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Stockout Risk Radar &amp; velocity
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Storefront Back-in-Stock widget
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> 90 days activity audit logs
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Priority email support
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => handlePlanSelect("PRO")}
+                  className="btn-secondary"
+                  disabled={isChangingPlan}
+                  style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
+                >
+                  {isChangingPlan && targetPlan === "PRO"
+                    ? "Processing..."
+                    : selectedPlan === "PRO"
+                    ? "Current Active Plan"
+                    : "Upgrade to Pro"}
+                </button>
+              </div>
+
+              {/* Enterprise Tier */}
+              <div
+                style={{
+                  border: selectedPlan === "ENTERPRISE" ? "2px solid #4f46e5" : "1px solid var(--border-color)",
+                  borderRadius: "14px",
+                  padding: "22px",
+                  background: selectedPlan === "ENTERPRISE" ? "#f5f3ff" : "#ffffff",
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "space-between",
+                  position: "relative",
+                  boxShadow: selectedPlan === "ENTERPRISE" ? "0 4px 14px rgba(79, 70, 229, 0.12)" : "0 2px 8px rgba(0,0,0,0.04)",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", background: "#f3e8ff", color: "#7e22ce", padding: "3px 8px", borderRadius: "12px" }}>
+                      UNLIMITED POWER
+                    </span>
+                    {selectedPlan === "ENTERPRISE" && (
+                      <span style={{ fontSize: "11px", fontWeight: "700", background: "#4f46e5", color: "#ffffff", padding: "3px 8px", borderRadius: "12px" }}>
+                        CURRENT PLAN
+                      </span>
+                    )}
+                  </div>
+                  <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Enterprise Plan</h3>
+                  <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
+                    $29.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                  </div>
+                  <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
+                    For high-volume merchants with massive catalogs &amp; custom lead-time requirements.
+                  </p>
+
+                  <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
+                    <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> <strong>Unlimited active items</strong>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> <strong>Everything in Pro</strong>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Custom lead-time rules per vendor
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Webhook &amp; custom flow triggers
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Unlimited audit log retention
+                      </li>
+                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Dedicated account manager &amp; 24/7 SLA
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => handlePlanSelect("ENTERPRISE")}
+                  className="btn-secondary"
+                  disabled={isChangingPlan}
+                  style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
+                >
+                  {isChangingPlan && targetPlan === "ENTERPRISE"
+                    ? "Processing..."
+                    : selectedPlan === "ENTERPRISE"
+                    ? "Current Active Plan"
+                    : "Upgrade to Enterprise"}
+                </button>
+              </div>
             </div>
+          </div>
+
+          {/* Detailed Feature Comparison Matrix */}
+          <div className="table-card" style={{ padding: "24px" }}>
+            <h3 style={{ fontSize: "17px", margin: "0 0 16px 0", color: "#312e81" }}>
+              Detailed Plan Feature Matrix
+            </h3>
+
+            <table className="stock-table" style={{ fontSize: "13px" }}>
+              <thead>
+                <tr>
+                  <th style={{ width: "30%" }}>Feature</th>
+                  <th style={{ width: "17.5%", textAlign: "center" }}>Starter ($0)</th>
+                  <th style={{ width: "17.5%", textAlign: "center" }}>Growth ($3.99)</th>
+                  <th style={{ width: "17.5%", textAlign: "center" }}>Pro ($15.99)</th>
+                  <th style={{ width: "17.5%", textAlign: "center" }}>Enterprise ($29.99)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Catalog Active Items Limit</strong></td>
+                  <td style={{ textAlign: "center" }}>Up to 50</td>
+                  <td style={{ textAlign: "center" }}>Up to 500</td>
+                  <td style={{ textAlign: "center" }}>Up to 5,000</td>
+                  <td style={{ textAlign: "center" }}><strong>Unlimited</strong></td>
+                </tr>
+                <tr>
+                  <td><strong>Out-of-Stock Auto Tagging</strong></td>
+                  <td style={{ textAlign: "center" }}>Basic</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Full Auto</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Full Auto</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Custom Rules</td>
+                </tr>
+                <tr>
+                  <td><strong>Auto-Hide Sold Out Products</strong></td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                </tr>
+                <tr>
+                  <td><strong>Auto-Publish Back-in-Stock</strong></td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                </tr>
+                <tr>
+                  <td><strong>Dynamic Restock Lead Time</strong></td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                </tr>
+                <tr>
+                  <td><strong>Stockout Risk Radar &amp; Velocity</strong></td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Advanced AI</td>
+                </tr>
+                <tr>
+                  <td><strong>Storefront Back-in-Stock Widget</strong></td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                </tr>
+                <tr>
+                  <td><strong>Vendor-Specific Safety Rules</strong></td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+                  <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+                </tr>
+                <tr>
+                  <td><strong>Activity Log Audit Retention</strong></td>
+                  <td style={{ textAlign: "center" }}>7 Days</td>
+                  <td style={{ textAlign: "center" }}>30 Days</td>
+                  <td style={{ textAlign: "center" }}>90 Days</td>
+                  <td style={{ textAlign: "center" }}><strong>Unlimited</strong></td>
+                </tr>
+                <tr>
+                  <td><strong>Support Service Level (SLA)</strong></td>
+                  <td style={{ textAlign: "center" }}>Community</td>
+                  <td style={{ textAlign: "center" }}>Standard Email</td>
+                  <td style={{ textAlign: "center" }}>Priority Email</td>
+                  <td style={{ textAlign: "center", color: "#7e22ce", fontWeight: "600" }}>24/7 Dedicated Manager</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       )}
