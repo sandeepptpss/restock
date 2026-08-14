@@ -51,6 +51,8 @@ model InventorySettings {
   removeFromCollectionId String?
   enableEmailAlerts      Boolean  @default(true)
   alertEmail             String?
+  notifyOnStockout       Boolean  @default(true)
+  notifyOnRestock        Boolean  @default(true)
   leadTimeDays           Int      @default(14)
   targetStockDays        Int      @default(30)
   createdAt              DateTime @default(now())

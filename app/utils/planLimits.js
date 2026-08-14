@@ -23,20 +23,20 @@ export function checkPlanLimitStatus(currentPlan, totalItemsCount) {
   const isBreached = totalItemsCount > limit;
 
   let targetUpgradePlan = "PRO";
-  let targetUpgradePrice = "$15.99/mo";
+  let targetUpgradePrice = "$19.99/mo";
   let limitText = "500-product limit";
 
   if (planKey === "FREE") {
     targetUpgradePlan = "GROWTH";
-    targetUpgradePrice = "$3.99/mo";
+    targetUpgradePrice = "$5.99/mo";
     limitText = "50-product limit";
   } else if (planKey === "GROWTH") {
     targetUpgradePlan = "PRO";
-    targetUpgradePrice = "$15.99/mo";
+    targetUpgradePrice = "$19.99/mo";
     limitText = "500-product limit";
   } else if (planKey === "PRO") {
     targetUpgradePlan = "ENTERPRISE";
-    targetUpgradePrice = "$29.99/mo";
+    targetUpgradePrice = "$39.99/mo";
     limitText = "5,000-product limit";
   }
 

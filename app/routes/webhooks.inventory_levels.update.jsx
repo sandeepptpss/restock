@@ -3,6 +3,7 @@ import {
   getInventorySettings,
   getProductThresholds,
   recordInventoryEvent,
+  annotateInventoryEvent,
   createAutomationLog,
   scheduleProductRestock,
   cancelPendingRestocks,
@@ -12,12 +13,15 @@ import {
   calculateDelayMs,
   classifyInventoryTransition,
   classifyLowStockTransition,
+  resolveVariantThreshold,
+  anyVariantLowOnStock,
   describeTransition,
   applyStockoutVisibility,
   restoreProductVisibility,
   INVENTORY_TRANSITION,
   checkThemeAppEmbedEnabled,
 } from "../models/inventory.server";
+import { sendMerchantInventoryEmail } from "../models/email.server";
 
 export const action = async ({ request }) => {
   const { topic, shop, payload, admin: webhookAdmin } = await authenticate.webhook(request);
@@ -101,11 +105,26 @@ export const action = async ({ request }) => {
     }
 
     // Query product & variant associated with inventoryItemId
+    const inventoryItemGid = String(inventoryItemId).startsWith("gid://")
+      ? String(inventoryItemId)
+      : `gid://shopify/InventoryItem/${inventoryItemId}`;
+
     const response = await admin.graphql(
       `#graphql
         query getProductByInventoryItem($inventoryItemId: ID!) {
           inventoryItem(id: $inventoryItemId) {
             id
+            # Every location this item is stocked at. The webhook reports the
+            # available quantity for ONE location, while a variant's
+            # inventoryQuantity is the total across all of them — comparing the
+            # two directly understated a multi-location variant and emptied it on
+            # paper while stock remained elsewhere.
+            inventoryLevels(first: 20) {
+              nodes {
+                location { id }
+                quantities(names: ["available"]) { name quantity }
+              }
+            }
             variant {
               id
               title
@@ -127,7 +146,9 @@ export const action = async ({ request }) => {
                     node {
                       id
                       title
+                      sku
                       inventoryQuantity
+                      inventoryItem { id }
                     }
                   }
                 }
@@ -136,13 +157,7 @@ export const action = async ({ request }) => {
           }
         }
       `,
-      {
-        variables: {
-          inventoryItemId: String(inventoryItemId).startsWith("gid://")
-            ? String(inventoryItemId)
-            : `gid://shopify/InventoryItem/${inventoryItemId}`,
-        },
-      }
+      { variables: { inventoryItemId: inventoryItemGid } }
     );
 
     const resJson = await response.json();
@@ -155,17 +170,74 @@ export const action = async ({ request }) => {
       return new Response(null, { status: 200 });
     }
 
+    // The event was recorded before this lookup, so the variant it belongs to can
+    // only be attached now. Fire-and-forget: it is history, not a decision input.
+    if (eventRecord?.event?.id) {
+      annotateInventoryEvent(eventRecord.event.id, {
+        productId: product.id,
+        variantId: variant.id,
+      }).catch(() => {});
+    }
+
     const logsToCreate = [];
 
     // 3. Evaluate EVERY variant of the parent product before touching the product.
-    // The variant this webhook is about is overridden with `newAvailable` from the
-    // payload, because the GraphQL read can still return its pre-change quantity.
+    //
+    // The changed variant's total is rebuilt from its own inventory levels with
+    // the webhook's location overridden by `available`, because the GraphQL read
+    // can still return the pre-change quantity for that location.
+    const changedVariantQuantity = (() => {
+      const levels = invData?.inventoryLevels?.nodes || [];
+      if (levels.length === 0) return newAvailable;
+
+      let total = 0;
+      let sawWebhookLocation = false;
+      for (const level of levels) {
+        const isWebhookLocation =
+          locationId && String(level.location?.id || "").endsWith(`/${String(locationId).split("/").pop()}`);
+        if (isWebhookLocation) {
+          sawWebhookLocation = true;
+          total += newAvailable;
+          continue;
+        }
+        const available = (level.quantities || []).find((q) => q.name === "available");
+        total += Number(available?.quantity) || 0;
+      }
+      // The level for this location has not appeared in the API yet (a brand new
+      // stocking location), so the payload's own figure is all there is.
+      return sawWebhookLocation ? total : total + newAvailable;
+    })();
+
     const prodVariants = product.variants?.edges?.map((e) => e.node) || [];
-    const variantQuantities = prodVariants.map((v) =>
-      String(v.id) === String(variant.id) ? newAvailable : (v.inventoryQuantity ?? 0)
-    );
+    // Matched on the inventory item as well as the variant id: the item is what
+    // the webhook actually identifies, and it survives a variant id format change.
+    const isChangedVariant = (v) =>
+      String(v.id) === String(variant.id) ||
+      (v.inventoryItem?.id && String(v.inventoryItem.id) === String(invData.id));
+
+    const variantStates = prodVariants.map((v) => ({
+      productId: product.id,
+      variantId: v.id,
+      variantTitle: v.title,
+      sku: v.sku || "",
+      inventoryItemId: v.inventoryItem?.id || null,
+      quantity: isChangedVariant(v) ? changedVariantQuantity : (v.inventoryQuantity ?? 0),
+    }));
+
+    const variantQuantities = variantStates.map((v) => v.quantity);
     const inStockVariants = variantQuantities.filter((q) => q > 0).length;
     const variantSummary = `${inStockVariants}/${variantQuantities.length} variants in stock`;
+
+    // Every automation decision below is about whether the *variant* is sellable,
+    // which is its total across locations — not the single location this webhook
+    // reports. The old total follows exactly from the new one and the location's
+    // own before/after figures, so no extra API call is needed.
+    const variantTransition = transition.hasPrevious
+      ? classifyInventoryTransition(
+          changedVariantQuantity - newAvailable + transition.oldQuantity,
+          changedVariantQuantity
+        )
+      : classifyInventoryTransition(null, changedVariantQuantity);
 
     // With more variants than one page holds we cannot prove they are all empty,
     // so the product is never hidden on partial data.
@@ -180,27 +252,87 @@ export const action = async ({ request }) => {
       !variantsTruncated && evaluateStockoutCondition(variantQuantities, settings.variantStrategy);
 
     console.log(
-      `[Webhook] ${product.title} / ${variant.title}: ${describeTransition(transition)} — ${variantSummary}, product ${product.status}`
+      `[Webhook] ${product.title} / ${variant.title}: ${describeTransition(variantTransition)} — ${variantSummary}, product ${product.status}`
     );
 
-    // 4a. STOCKOUT — this variant just emptied (>0 → 0). The product itself is only
-    // hidden when the configured Variant Stockout Condition is met, which for the
-    // default strategy means every variant is out of stock.
-    if (transition.type === INVENTORY_TRANSITION.STOCKOUT && !isStockoutCondition) {
+    // 4. PER-VARIANT STOCKOUT ACTIONS
+    //
+    // These belong to the variant that emptied and run whether or not the product
+    // as a whole qualifies for hiding. Auto-fill in particular is a per-variant
+    // recovery: scoping it to the product-level stockout left every empty variant
+    // of a still-buyable product sitting at 0 with nothing scheduled to refill it.
+    if (variantTransition.type === INVENTORY_TRANSITION.STOCKOUT) {
+      if (settings.enableEmailAlerts !== false && settings.notifyOnStockout !== false) {
+        sendMerchantInventoryEmail(shop, {
+          eventType: "STOCKOUT",
+          productId: product.id,
+          productTitle: product.title,
+          variantTitle: variant.title,
+          variantId: variant.id,
+          sku: variant.sku,
+          quantity: changedVariantQuantity,
+          settings,
+        }).catch((emailErr) => console.error("[Webhook] Non-blocking stockout email alert error:", emailErr));
+      }
+
+      // Gated on auto-fill alone: with it off the job would carry a target of 0
+      // and every empty variant's job would repeat the same product-level
+      // untag/unhide. The Restock Delay still applies — it sets when this runs.
+      if (settings.enableAutoFill) {
+        try {
+          const job = await scheduleProductRestock(admin, {
+            shop,
+            productId: product.id,
+            variantId: variant.id,
+            inventoryItemId,
+            locationId,
+            productTitle: product.title,
+            variantTitle: variant.title,
+            sku: variant.sku,
+          });
+
+          if (job?.created || !job) {
+            logsToCreate.push({
+              shop,
+              eventType: "SCHEDULED_RESTOCK",
+              productId: product.id,
+              productTitle: product.title,
+              variantId: variant.id,
+              variantTitle: variant.title,
+              inventoryItemId: invData.id,
+              sku: variant.sku,
+              quantity: changedVariantQuantity,
+              actionTaken: `Scheduled Auto-Restock for variant '${variant.title}' (${settings.restockDelayValue} ${settings.restockDelayUnit}, target: ${settings.autoFillQuantity} units)`,
+              status: job ? "SUCCESS" : "FAILED",
+              details: job ? null : "Could not persist the scheduled restock job",
+            });
+          }
+        } catch (schedErr) {
+          console.error("[Webhook] Error scheduling restock timer:", schedErr);
+        }
+      }
+    }
+
+    // 4a. This variant emptied but the product stays listed, because the configured
+    // Variant Stockout Condition is not met — for the default strategy that means
+    // at least one sibling variant is still buyable.
+    if (variantTransition.type === INVENTORY_TRANSITION.STOCKOUT && !isStockoutCondition) {
       logsToCreate.push({
         shop,
         eventType: "VARIANT_STOCKOUT",
         productId: product.id,
         productTitle: product.title,
+        variantId: variant.id,
         variantTitle: variant.title,
+        inventoryItemId: invData.id,
         sku: variant.sku,
-        quantity: newAvailable,
-        actionTaken: `[Webhook Trigger] Variant out of stock — product left ${product.status} (${variantSummary})`,
+        quantity: changedVariantQuantity,
+        actionTaken: `[Webhook Trigger] Variant out of stock — product left ${product.status} under ${settings.variantStrategy} (${variantSummary})`,
         status: "SUCCESS",
       });
     }
-    // 4b. STOCKOUT RULE EVALUATION (every variant now empty)
-    else if (transition.type === INVENTORY_TRANSITION.STOCKOUT) {
+    // 4b. PRODUCT-LEVEL STOCKOUT RULE EVALUATION
+    else if (variantTransition.type === INVENTORY_TRANSITION.STOCKOUT) {
       const tagToApply = settings.outOfStockTag || "out-of-stock";
 
       // The product emptied again before an earlier restock's unhide delay ran out,
@@ -246,50 +378,40 @@ export const action = async ({ request }) => {
           eventType: "AUTO_HIDE",
           productId: product.id,
           productTitle: product.title,
+          variantId: variant.id,
           variantTitle: variant.title,
+          inventoryItemId: invData.id,
           sku: variant.sku,
-          quantity: newAvailable,
-          actionTaken: `[Webhook Trigger] Applied tag '${tagToApply}' & ${visibility.action} [${visibility.mode}] (Quantity 0)`,
+          quantity: changedVariantQuantity,
+          actionTaken: `[Webhook Trigger] Applied tag '${tagToApply}' & ${visibility.action} [${visibility.mode}] — ${settings.variantStrategy} condition met (${variantSummary})`,
           status: visibility.errors.length > 0 ? "FAILED" : "SUCCESS",
           details: visibility.errors.length > 0 ? visibility.errors.join(" | ") : null,
         });
-      }
-
-      // Action C: Schedule Dynamic Restock & Auto-Fill Timer (e.g. 2 MINUTES -> 10 Units)
-      if (settings.restockDelayValue > 0 || settings.enableAutoFill) {
-        try {
-          await scheduleProductRestock(admin, {
-            shop,
-            productId: product.id,
-            variantId: variant.id,
-            inventoryItemId,
-            locationId,
-            productTitle: product.title,
-            variantTitle: variant.title,
-            sku: variant.sku,
-          });
-
-          logsToCreate.push({
-            shop,
-            eventType: "SCHEDULED_RESTOCK",
-            productId: product.id,
-            productTitle: product.title,
-            variantTitle: variant.title,
-            sku: variant.sku,
-            quantity: newAvailable,
-            actionTaken: `Scheduled Auto-Restock (${settings.restockDelayValue} ${settings.restockDelayUnit}, target: ${settings.enableAutoFill ? settings.autoFillQuantity : 0} units)`,
-            status: "SUCCESS",
-          });
-        } catch (schedErr) {
-          console.error("[Webhook] Error scheduling restock timer:", schedErr);
-        }
       }
     }
     // 4c. RESTOCK RULE EVALUATION — this variant crossed 0 → >0.
     // The body runs in its own scope so that "nothing to undo" ends the restock
     // handling without also skipping the low-stock evaluation in step 5 — a
     // variant can come back into stock and still be below its low-stock limit.
-    else if (transition.type === INVENTORY_TRANSITION.RESTOCK) {
+    else if (variantTransition.type === INVENTORY_TRANSITION.RESTOCK) {
+      if (settings.enableEmailAlerts !== false && settings.notifyOnRestock !== false) {
+        sendMerchantInventoryEmail(shop, {
+          eventType: "RESTOCK",
+          productId: product.id,
+          productTitle: product.title,
+          variantTitle: variant.title,
+          variantId: variant.id,
+          sku: variant.sku,
+          quantity: changedVariantQuantity,
+          settings,
+        }).catch((emailErr) => console.error("[Webhook] Non-blocking restock email alert error:", emailErr));
+      }
+
+      // This variant is buyable again, so the auto-fill queued for *it* is
+      // obsolete. Scoped to the variant: its siblings' pending refills are still
+      // needed and cancelling them here is what stranded them at 0.
+      await cancelPendingRestocks(shop, product.id, { variantId: variant.id });
+
       await (async () => {
         const tagToRemove = settings.outOfStockTag || "out-of-stock";
         const existingTags = Array.isArray(product.tags) ? product.tags : [];
@@ -306,10 +428,6 @@ export const action = async ({ request }) => {
           return;
         }
 
-        // The product is buyable again, so a restock job queued by the earlier
-        // stockout would only auto-fill over the merchant's own quantity.
-        await cancelPendingRestocks(shop, product.id);
-
         const tagNeedsRemoving = settings.enableAutoTag !== false && existingTags.includes(tagToRemove);
         const visibilityNeedsRestoring =
           settings.enableAutoPublish !== false &&
@@ -323,7 +441,7 @@ export const action = async ({ request }) => {
         // the duplicate "Set status to ACTIVE" entries in the audit trail.
         if (!tagNeedsRemoving && !visibilityNeedsRestoring) {
           console.log(
-            `[Webhook] ${product.title} restocked (${describeTransition(transition)}) but already visible and untagged; no action needed`
+            `[Webhook] ${product.title} restocked (${describeTransition(variantTransition)}) but already visible and untagged; no action needed`
           );
           return;
         }
@@ -352,9 +470,11 @@ export const action = async ({ request }) => {
             eventType: "SCHEDULED_UNHIDE",
             productId: product.id,
             productTitle: product.title,
+            variantId: variant.id,
             variantTitle: variant.title,
+            inventoryItemId: invData.id,
             sku: variant.sku,
-            quantity: newAvailable,
+            quantity: changedVariantQuantity,
             actionTaken: `[Webhook Trigger] Restocked — auto-unhide scheduled in ${settings.restockDelayValue} ${settings.restockDelayUnit} (${variantSummary})`,
             status: job ? "SUCCESS" : "FAILED",
             details: job
@@ -409,9 +529,11 @@ export const action = async ({ request }) => {
           eventType: "RESTOCK",
           productId: product.id,
           productTitle: product.title,
+          variantId: variant.id,
           variantTitle: variant.title,
+          inventoryItemId: invData.id,
           sku: variant.sku,
-          quantity: newAvailable,
+          quantity: changedVariantQuantity,
           actionTaken: `[Webhook Trigger] ${actions.join(" & ")} on restock (${variantSummary})`,
           status: restockErrors.length > 0 ? "FAILED" : "SUCCESS",
           details: restockErrors.length > 0 ? restockErrors.join(" | ") : null,
@@ -426,19 +548,22 @@ export const action = async ({ request }) => {
     //
     // Evaluated independently of the transition type: a variant can come back into
     // stock (0 → 2) and be below its limit in the same webhook.
-    const customThreshold =
-      customThresholds.find(
-        (t) => t.productId === product.id && String(t.variantId || "") === String(variant.id)
-      ) || customThresholds.find((t) => t.productId === product.id && !t.variantId);
-    const threshold = customThreshold
-      ? Number(customThreshold.minThreshold)
-      : Number(settings.defaultLowStockLimit) || 0;
+    const threshold = resolveVariantThreshold(
+      { productId: product.id, variantId: variant.id },
+      settings,
+      customThresholds
+    );
 
     const lowStockTag = settings.lowStockTag || "low-stock";
     const productTags = Array.isArray(product.tags) ? product.tags : [];
     const hasLowStockTag = productTags.includes(lowStockTag);
 
-    const lowStock = classifyLowStockTransition(transition, threshold);
+    const lowStock = classifyLowStockTransition(variantTransition, threshold);
+
+    // The tag lives on the product, so withdrawing it has to be a statement about
+    // every variant, each against its own limit. Keying the removal on this one
+    // variant pulled the tag off products whose *other* variants were still low.
+    const someVariantStillLow = anyVariantLowOnStock(variantStates, settings, customThresholds);
 
     if (lowStock.entered) {
       const lowStockErrors = [];
@@ -484,7 +609,7 @@ export const action = async ({ request }) => {
           : `Recorded low stock (already tagged '${lowStockTag}')`;
 
       console.log(
-        `[Webhook] ${product.title} / ${variant.title} is low on stock: ${newAvailable} ≤ threshold ${threshold}`
+        `[Webhook] ${product.title} / ${variant.title} is low on stock: ${changedVariantQuantity} ≤ threshold ${threshold}`
       );
 
       logsToCreate.push({
@@ -492,19 +617,21 @@ export const action = async ({ request }) => {
         eventType: "LOW_STOCK",
         productId: product.id,
         productTitle: product.title,
+        variantId: variant.id,
         variantTitle: variant.title,
+        inventoryItemId: invData.id,
         sku: variant.sku,
-        quantity: newAvailable,
-        actionTaken: `[Webhook Trigger] ${summary} — ${newAvailable} left, at or below the ${threshold}-unit limit (${describeTransition(transition)})`,
+        quantity: changedVariantQuantity,
+        actionTaken: `[Webhook Trigger] ${summary} — ${changedVariantQuantity} left, at or below the ${threshold}-unit limit (${describeTransition(variantTransition)})`,
         status: lowStockErrors.length > 0 ? "FAILED" : "SUCCESS",
         details: lowStockErrors.length > 0 ? lowStockErrors.join(" | ") : null,
       });
     }
     // Back above the limit (or emptied, where the out-of-stock tag takes over): the
-    // low-stock tag no longer describes the variant, so it is withdrawn. Keyed off
-    // the tag rather than `lowStock.left` so a tag left behind by an earlier failure
-    // is still cleaned up.
-    else if (!lowStock.isLow && hasLowStockTag && settings.enableAutoTag !== false) {
+    // low-stock tag no longer describes the product, so it is withdrawn — but only
+    // once no variant is low. Keyed off the tag rather than `lowStock.left` so a tag
+    // left behind by an earlier failure is still cleaned up.
+    else if (!lowStock.isLow && !someVariantStillLow && hasLowStockTag && settings.enableAutoTag !== false) {
       try {
         const tagRes = await admin.graphql(
           `#graphql
@@ -529,13 +656,15 @@ export const action = async ({ request }) => {
           eventType: "LOW_STOCK",
           productId: product.id,
           productTitle: product.title,
+          variantId: variant.id,
           variantTitle: variant.title,
+          inventoryItemId: invData.id,
           sku: variant.sku,
-          quantity: newAvailable,
+          quantity: changedVariantQuantity,
           actionTaken:
-            newAvailable > 0
-              ? `[Webhook Trigger] Removed tag '${lowStockTag}' — back above the ${threshold}-unit limit`
-              : `[Webhook Trigger] Removed tag '${lowStockTag}' — variant is now out of stock`,
+            changedVariantQuantity > 0
+              ? `[Webhook Trigger] Removed tag '${lowStockTag}' — no variant is below its low-stock limit any more (${variantSummary})`
+              : `[Webhook Trigger] Removed tag '${lowStockTag}' — variant is now out of stock and no other variant is low (${variantSummary})`,
           status: tagErrs.length > 0 ? "FAILED" : "SUCCESS",
           details: tagErrs.length > 0 ? tagErrs.join(" | ") : null,
         });

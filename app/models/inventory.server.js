@@ -26,6 +26,12 @@ const VELOCITY_WINDOW_DAYS = 30;
 // a burst of sales on install day is not a trend.
 const MIN_VELOCITY_OBSERVATION_DAYS = 3;
 
+// How long a scan-triggered alert suppresses the next identical one for the same
+// variant. The catalogue scan re-observes the same standing stockout on every
+// run, so unlike the webhook — which only fires on a real change — it needs a
+// window measured in hours rather than seconds.
+const SCAN_ALERT_DEDUPE_MS = Number(process.env.SCAN_ALERT_DEDUPE_MS) || 6 * 60 * 60 * 1000;
+
 /**
  * Run a GraphQL request, backing off and retrying when Shopify throttles us.
  * Large catalogues exhaust the cost bucket, and an unhandled THROTTLED error
@@ -76,6 +82,8 @@ const DEFAULT_SETTINGS = (shop) => ({
   removeFromCollectionId: "",
   enableEmailAlerts: true,
   alertEmail: "",
+  notifyOnStockout: true,
+  notifyOnRestock: true,
   leadTimeDays: 14,
   targetStockDays: 30,
 });
@@ -138,7 +146,9 @@ export async function updateInventorySettings(shop, data) {
     outOfStockCollectionId: data.outOfStockCollectionId || existing.outOfStockCollectionId || "",
     removeFromCollectionId: data.removeFromCollectionId || existing.removeFromCollectionId || "",
     enableEmailAlerts: data.enableEmailAlerts != null ? Boolean(data.enableEmailAlerts) : existing.enableEmailAlerts,
-    alertEmail: data.alertEmail || existing.alertEmail || "",
+    alertEmail: data.alertEmail != null ? data.alertEmail : (existing.alertEmail || ""),
+    notifyOnStockout: data.notifyOnStockout != null ? Boolean(data.notifyOnStockout) : (existing.notifyOnStockout ?? true),
+    notifyOnRestock: data.notifyOnRestock != null ? Boolean(data.notifyOnRestock) : (existing.notifyOnRestock ?? true),
     leadTimeDays: data.leadTimeDays != null ? (Number(data.leadTimeDays) || 14) : existing.leadTimeDays,
     targetStockDays: data.targetStockDays != null ? (Number(data.targetStockDays) || 30) : existing.targetStockDays,
   };
@@ -322,6 +332,39 @@ export function classifyLowStockTransition(transition, threshold) {
 }
 
 /**
+ * The low-stock limit that applies to one variant: its own override first, then
+ * a product-wide override, then the shop default.
+ */
+export function resolveVariantThreshold({ productId, variantId }, settings, customThresholds = []) {
+  const variantOverride = customThresholds.find(
+    (t) => t.productId === productId && variantId && String(t.variantId || "") === String(variantId)
+  );
+  const productOverride = customThresholds.find((t) => t.productId === productId && !t.variantId);
+  const override = variantOverride || productOverride;
+  return override ? Number(override.minThreshold) || 0 : Number(settings?.defaultLowStockLimit) || 0;
+}
+
+/**
+ * Whether *any* variant of a product is currently low on stock.
+ *
+ * The low-stock tag lives on the product, but the condition is per variant, so
+ * withdrawing the tag has to be a statement about every variant. Keying it off
+ * the one variant a webhook happens to be about pulled the tag off a product
+ * whose other variants were still low.
+ *
+ * `variants` is `[{ productId, variantId, quantity }]`. Empty variants are not
+ * low stock — they are out of stock, which the out-of-stock tag covers.
+ */
+export function anyVariantLowOnStock(variants, settings, customThresholds = []) {
+  return (variants || []).some((v) => {
+    const qty = Number(v.quantity) || 0;
+    if (qty <= 0) return false;
+    const limit = resolveVariantThreshold(v, settings, customThresholds);
+    return limit > 0 && qty <= limit;
+  });
+}
+
+/**
  * Human-readable form of a transition, for logs: "0 → 5 (RESTOCK)".
  */
 export function describeTransition(transition) {
@@ -348,6 +391,10 @@ export async function recordInventoryEvent(shop, params) {
     const inventoryItemId = typeof params === "object" ? String(params?.inventoryItemId || "") : "";
     const newQuantity = typeof params === "object" ? Number(params?.newQuantity || 0) : 0;
     const locationId = typeof params === "object" && params?.locationId ? String(params.locationId) : null;
+    // Optional: the webhook only knows the inventory item up front and resolves
+    // the variant afterwards (see annotateInventoryEvent).
+    const productId = typeof params === "object" && params?.productId ? String(params.productId) : null;
+    const variantId = typeof params === "object" && params?.variantId ? String(params.variantId) : null;
 
     if (webhookId) {
       const existing = await InventoryEvent.exists({ webhookId });
@@ -387,6 +434,8 @@ export async function recordInventoryEvent(shop, params) {
       created = await InventoryEvent.create({
         shop,
         inventoryItemId: inventoryItemId || "N/A",
+        productId,
+        variantId,
         locationId,
         oldQuantity,
         newQuantity,
@@ -405,9 +454,37 @@ export async function recordInventoryEvent(shop, params) {
 
     return { isDuplicate: false, event: plain(created), transition };
   } catch (err) {
-    console.warn("Error recording inventory event (skipped gracefully):", err.message);
+    // Loud on purpose. The fallback below reports every change as a first
+    // observation, which makes an empty variant look like a fresh stockout on
+    // every delivery — a silent warning let exactly that run for weeks.
+    console.error(
+      "[recordInventoryEvent] Could not record the event; falling back to a first-observation transition (idempotency and previous-quantity tracking are disabled for this event):",
+      err.message
+    );
     const newQuantity = typeof params === "object" ? Number(params?.newQuantity || 0) : 0;
-    return { isDuplicate: false, transition: classifyInventoryTransition(null, newQuantity) };
+    return {
+      isDuplicate: false,
+      degraded: true,
+      transition: classifyInventoryTransition(null, newQuantity),
+    };
+  }
+}
+
+/**
+ * Attach the product/variant the webhook resolved to an event that was recorded
+ * before that lookup happened, so the per-variant history is queryable.
+ */
+export async function annotateInventoryEvent(eventId, { productId, variantId }) {
+  if (!isDbConfigured() || !eventId) return;
+  if (!mongoose.isValidObjectId(eventId)) return;
+  try {
+    await tryConnectDB();
+    await InventoryEvent.updateOne(
+      { _id: eventId },
+      { $set: { productId: productId || null, variantId: variantId || null } }
+    );
+  } catch (err) {
+    console.warn("[annotateInventoryEvent] Could not attach variant identity:", err.message);
   }
 }
 
@@ -636,6 +713,10 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
         productTitle: prod.title,
         productHandle: prod.handle,
         productStatus: prod.status,
+        // More variants than one page holds means "every variant is empty"
+        // cannot be proven, so the scan must not hide on this data — the same
+        // rule the webhook already applies.
+        productVariantsTruncated: Boolean(prod.variants?.pageInfo?.hasNextPage),
         productSeoHidden: prod.seoHidden?.value ?? null,
         productTags: prod.tags || [],
         imageUrl: prod.featuredImage?.url || null,
@@ -659,6 +740,7 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
   return {
     items: formattedItems,
     settings,
+    customThresholds,
     primaryLocationId: locations.find((l) => l.isPrimary)?.id || locations[0]?.id || null,
   };
 }
@@ -748,7 +830,7 @@ export async function runStockoutAutomationScan(admin, shop) {
   const isEmbedEnabled = await checkThemeAppEmbedEnabled(admin);
 
   // 3. Fetch live inventory data from Shopify AFTER restocks have executed
-  const { items, settings, primaryLocationId } = await fetchShopifyInventory(admin, shop);
+  const { items, settings, customThresholds, primaryLocationId } = await fetchShopifyInventory(admin, shop);
   const logsToCreate = [];
   let taggedCount = 0;
   let hiddenCount = 0;
@@ -804,11 +886,103 @@ export async function runStockoutAutomationScan(admin, shop) {
     // hide a product using the pre-removal snapshot from the catalogue fetch.
     let outOfStockTagRemoved = false;
 
-    // Determine if product qualifies for Stockout Action according to Variant Strategy
-    const isProductStockout = evaluateStockoutCondition(
-      productItems.map((i) => i.inventoryQuantity),
-      settings.variantStrategy
-    );
+    // Determine if product qualifies for Stockout Action according to Variant
+    // Strategy. A product whose variant list was truncated is never hidden on
+    // that partial view — the variants that were not read could be in stock.
+    const variantsTruncated = Boolean(firstItem.productVariantsTruncated);
+    if (variantsTruncated) {
+      console.warn(
+        `[Scan] ${firstItem.productTitle} has more than 100 variants; only the first 100 were evaluated, skipping any hide action`
+      );
+    }
+    const isProductStockout =
+      !variantsTruncated &&
+      evaluateStockoutCondition(
+        productItems.map((i) => i.inventoryQuantity),
+        settings.variantStrategy
+      );
+
+    const emptyVariants = productItems.filter((i) => i.inventoryQuantity <= 0);
+    const stockedVariants = productItems.filter((i) => i.inventoryQuantity > 0);
+    const variantSummary = `${stockedVariants.length}/${productItems.length} variants in stock`;
+
+    // 0. PER-VARIANT RECOVERY — runs whatever the product-level decision is.
+    //
+    // Hiding is a product-level action and rightly waits for the configured
+    // Variant Stockout Condition, but auto-fill is a *variant* action: an empty
+    // variant needs refilling even when its siblings keep the product buyable.
+    // Scheduling only the first variant's job is what left every other empty
+    // variant of a multi-variant product sitting at 0 indefinitely.
+    //
+    // Gated on auto-fill alone: with it switched off the job would carry a target
+    // of 0, and every one of them would race to repeat the same product-level
+    // untag/unhide. The Restock Delay still applies — it sets when this job runs.
+    if (settings.enableAutoFill) {
+      for (const item of emptyVariants) {
+        try {
+          const job = await scheduleProductRestock(admin, {
+            shop,
+            productId,
+            variantId: item.variantId,
+            inventoryItemId: item.inventoryItemId,
+            locationId: primaryLocationId,
+            productTitle: item.productTitle,
+            variantTitle: item.variantTitle,
+            sku: item.sku,
+          });
+
+          // Only a newly queued job is news. Re-logging a job that has been
+          // pending since the last pass would bury the audit trail under one
+          // entry per variant per scan.
+          if (job?.created) {
+            alertsCount++;
+            logsToCreate.push({
+              shop,
+              eventType: "VARIANT_STOCKOUT",
+              productId,
+              productTitle: item.productTitle,
+              variantId: item.variantId,
+              variantTitle: item.variantTitle,
+              inventoryItemId: item.inventoryItemId,
+              sku: item.sku,
+              quantity: 0,
+              actionTaken: `Variant out of stock — auto-fill to ${settings.enableAutoFill ? settings.autoFillQuantity : 0} units scheduled (${variantSummary})`,
+              status: "SUCCESS",
+            });
+
+            if (settings.enableEmailAlerts !== false && settings.notifyOnStockout !== false) {
+              import("./email.server.js")
+                .then(({ sendMerchantInventoryEmail }) =>
+                  sendMerchantInventoryEmail(shop, {
+                    eventType: "STOCKOUT",
+                    productId,
+                    productTitle: item.productTitle,
+                    variantTitle: item.variantTitle,
+                    variantId: item.variantId,
+                    sku: item.sku,
+                    quantity: 0,
+                    settings,
+                    // A scan reconciles state rather than reacting to an event,
+                    // so it uses a much wider suppression window than the
+                    // webhook: a cron running every minute must not send a
+                    // stockout mail every minute.
+                    dedupeWindowMs: SCAN_ALERT_DEDUPE_MS,
+                  })
+                )
+                .catch((emailErr) => console.error("[Scan] Variant stockout email error:", emailErr));
+            }
+          }
+        } catch (schedErr) {
+          console.error(`[Scan] Error scheduling auto-fill for ${item.productTitle} / ${item.variantTitle}:`, schedErr);
+        }
+      }
+    }
+
+    // A variant that is back in stock has no use for a queued auto-fill — but
+    // only its own job is obsolete, not its siblings'.
+    for (const item of stockedVariants) {
+      await cancelPendingRestocks(shop, productId, { variantId: item.variantId, reason: "restocked variant" });
+    }
 
     // 1. STOCKOUT AUTOMATIONS
     if (isProductStockout) {
@@ -859,57 +1033,26 @@ export async function runStockoutAutomationScan(admin, shop) {
         }
       }
 
+      // The per-variant auto-fill jobs and stockout alerts were already queued
+      // above; this entry records the product-level action only, and names the
+      // variants that caused it instead of a bare "N Variants".
       logsToCreate.push({
         shop,
         eventType: "AUTO_HIDE",
         productId,
         productTitle: firstItem.productTitle,
-        variantTitle: `${productItems.length} Variants`,
+        variantTitle: emptyVariants.map((i) => i.variantTitle).join(", ") || firstItem.variantTitle,
         sku: firstItem.sku,
         quantity: totalProdInventory,
-        actionTaken: `Applied tag '${tagToApply}' & ${visibility.action} [${visibility.mode}] (Quantity 0)`,
+        actionTaken: `Applied tag '${tagToApply}' & ${visibility.action} [${visibility.mode}] — ${settings.variantStrategy} condition met (${variantSummary})`,
         status: visibility.errors.length > 0 ? "FAILED" : "SUCCESS",
         details: visibility.errors.length > 0 ? visibility.errors.join(" | ") : null,
       });
-
-      // Schedule Restock & Auto-Fill Timer (e.g. 1 MINUTE -> 10 Units)
-      if (settings.restockDelayValue > 0 || settings.enableAutoFill) {
-        try {
-          await scheduleProductRestock(admin, {
-            shop,
-            productId,
-            variantId: firstItem.variantId,
-            inventoryItemId: firstItem.inventoryItemId,
-            locationId: primaryLocationId,
-            productTitle: firstItem.productTitle,
-            variantTitle: firstItem.variantTitle,
-            sku: firstItem.sku,
-          });
-        } catch (schedErr) {
-          console.error("Error scheduling restock in scan:", schedErr);
-        }
-      }
-
-      // Stockout alert. No email provider is wired up, so this records the alert
-      // in Activity Logs rather than claiming a message was delivered.
-      if (settings.enableEmailAlerts) {
-        logsToCreate.push({
-          shop,
-          eventType: "STOCKOUT_ALERT",
-          productId,
-          productTitle: firstItem.productTitle,
-          quantity: totalProdInventory,
-          actionTaken: "Stockout alert recorded in Activity Logs",
-          status: "SUCCESS",
-          details: `Email delivery is not configured in this deployment${settings.alertEmail ? ` (intended recipient: ${settings.alertEmail})` : ""}`,
-        });
-      }
     }
-    // 2. RESTOCK AUTOMATIONS — at least one variant is buyable, so any restock job
-    // still queued from an earlier stockout is obsolete.
-    else if (productItems.some((i) => i.inventoryQuantity > 0)) {
-      await cancelPendingRestocks(shop, productId);
-
+    // 2. RESTOCK AUTOMATIONS — the product no longer meets the stockout condition,
+    // so the product-level hide can be reversed. The obsolete per-variant auto-fill
+    // jobs were already cancelled above, one stocked variant at a time.
+    else if (stockedVariants.length > 0 && !variantsTruncated) {
       // Same hold-down as the webhook: with a Restock Delay configured, the untag
       // and the visibility restore belong to a scheduled UNHIDE job, not to this
       // pass. Without one they run inline, exactly as before.
@@ -921,38 +1064,59 @@ export async function runStockoutAutomationScan(admin, shop) {
         settings.visibilityMode
       );
 
+      // The variant that put the product back in stock, for the audit trail.
+      const recoveredVariant = stockedVariants[0];
+
       if (unhideDelayMs > 0 && (carriesOutOfStockTagNow || (settings.enableAutoPublish && hiddenByApp))) {
         const job = await scheduleProductRestock(admin, {
           shop,
           productId,
-          variantId: firstItem.variantId,
-          inventoryItemId: firstItem.inventoryItemId,
+          variantId: recoveredVariant.variantId,
+          inventoryItemId: recoveredVariant.inventoryItemId,
           locationId: primaryLocationId,
-          productTitle: firstItem.productTitle,
-          variantTitle: firstItem.variantTitle,
-          sku: firstItem.sku,
+          productTitle: recoveredVariant.productTitle,
+          variantTitle: recoveredVariant.variantTitle,
+          sku: recoveredVariant.sku,
           jobType: "UNHIDE",
         });
 
-        logsToCreate.push({
-          shop,
-          eventType: "SCHEDULED_UNHIDE",
-          productId,
-          productTitle: firstItem.productTitle,
-          variantTitle: `${productItems.length} Variants`,
-          sku: firstItem.sku,
-          quantity: totalProdInventory,
-          actionTaken: `Restocked — auto-unhide scheduled in ${settings.restockDelayValue} ${settings.restockDelayUnit}`,
-          status: job ? "SUCCESS" : "FAILED",
-          details: job ? null : "Could not persist the scheduled unhide job",
-        });
+        if (job?.created) {
+          logsToCreate.push({
+            shop,
+            eventType: "SCHEDULED_UNHIDE",
+            productId,
+            productTitle: firstItem.productTitle,
+            variantId: recoveredVariant.variantId,
+            variantTitle: recoveredVariant.variantTitle,
+            inventoryItemId: recoveredVariant.inventoryItemId,
+            sku: recoveredVariant.sku,
+            quantity: totalProdInventory,
+            actionTaken: `Restocked — auto-unhide scheduled in ${settings.restockDelayValue} ${settings.restockDelayUnit} (${variantSummary})`,
+            status: "SUCCESS",
+            details: null,
+          });
+        } else if (!job) {
+          logsToCreate.push({
+            shop,
+            eventType: "SCHEDULED_UNHIDE",
+            productId,
+            productTitle: firstItem.productTitle,
+            variantId: recoveredVariant.variantId,
+            variantTitle: recoveredVariant.variantTitle,
+            sku: recoveredVariant.sku,
+            quantity: totalProdInventory,
+            actionTaken: `Restocked — auto-unhide could not be scheduled (${variantSummary})`,
+            status: "FAILED",
+            details: "Could not persist the scheduled unhide job",
+          });
+        }
 
         continue;
       }
 
-      if (settings.enableAutoTag && firstItem.productTags.includes(settings.outOfStockTag)) {
+      if (settings.enableAutoTag && (firstItem.productTags || []).includes(settings.outOfStockTag)) {
         try {
-          await admin.graphql(
+          const removeRes = await admin.graphql(
             `#graphql
               mutation tagsRemove($id: ID!, $tags: [String!]!) {
                 tagsRemove(id: $id, tags: $tags) { userErrors { message } }
@@ -960,16 +1124,22 @@ export async function runStockoutAutomationScan(admin, shop) {
             `,
             { variables: { id: productId, tags: [settings.outOfStockTag] } }
           );
+          const removeErrs = collectGraphqlErrors(await removeRes.json(), "tagsRemove");
           logsToCreate.push({
             shop,
             eventType: "RESTOCK",
             productId,
             productTitle: firstItem.productTitle,
+            variantId: recoveredVariant.variantId,
+            variantTitle: recoveredVariant.variantTitle,
+            inventoryItemId: recoveredVariant.inventoryItemId,
+            sku: recoveredVariant.sku,
             quantity: totalProdInventory,
-            actionTaken: `Removed tag '${settings.outOfStockTag}' following inventory restock`,
-            status: "SUCCESS",
+            actionTaken: `Removed tag '${settings.outOfStockTag}' following inventory restock (${variantSummary})`,
+            status: removeErrs.length > 0 ? "FAILED" : "SUCCESS",
+            details: removeErrs.length > 0 ? removeErrs.join(" | ") : null,
           });
-          outOfStockTagRemoved = true;
+          outOfStockTagRemoved = removeErrs.length === 0;
         } catch (err) {
           console.error("Tags remove error:", err);
         }
@@ -1000,13 +1170,36 @@ export async function runStockoutAutomationScan(admin, shop) {
           eventType: "RESTOCK",
           productId,
           productTitle: firstItem.productTitle,
+          variantId: recoveredVariant.variantId,
+          variantTitle: recoveredVariant.variantTitle,
+          inventoryItemId: recoveredVariant.inventoryItemId,
+          sku: recoveredVariant.sku,
           quantity: totalProdInventory,
-          actionTaken: `${restored.action} [${restored.mode}] upon restock`,
+          actionTaken: `${restored.action} [${restored.mode}] upon restock (${variantSummary})`,
           status: restored.errors.length > 0 ? "FAILED" : "SUCCESS",
           details: restored.errors.length > 0 ? restored.errors.join(" | ") : null,
         });
       }
+
+      if (outOfStockTagRemoved || (settings.enableAutoPublish && needsRestore)) {
+        if (settings.enableEmailAlerts !== false && settings.notifyOnRestock !== false) {
+          import("./email.server.js").then(({ sendMerchantInventoryEmail }) => {
+            sendMerchantInventoryEmail(shop, {
+              eventType: "RESTOCK",
+              productId,
+              productTitle: recoveredVariant.productTitle,
+              variantId: recoveredVariant.variantId,
+              variantTitle: recoveredVariant.variantTitle,
+              sku: recoveredVariant.sku,
+              quantity: recoveredVariant.inventoryQuantity,
+              settings,
+              dedupeWindowMs: SCAN_ALERT_DEDUPE_MS,
+            }).catch((emailErr) => console.error("[Scan] Restock email alert error:", emailErr));
+          });
+        }
+      }
     }
+
 
     // 3. TAG → VISIBILITY ENFORCEMENT
     //
@@ -1043,13 +1236,79 @@ export async function runStockoutAutomationScan(admin, shop) {
           eventType: "AUTO_HIDE",
           productId,
           productTitle: firstItem.productTitle,
-          variantTitle: `${productItems.length} Variants`,
+          variantTitle: variantSummary,
           sku: firstItem.sku,
           quantity: totalProdInventory,
           actionTaken: `${enforced.action} [${enforced.mode}] — carries the '${settings.outOfStockTag}' tag, so it must not be listed`,
           status: enforced.errors.length > 0 ? "FAILED" : "SUCCESS",
           details: enforced.errors.length > 0 ? enforced.errors.join(" | ") : null,
         });
+      }
+    }
+
+    // 4. LOW-STOCK TAG RECONCILIATION
+    //
+    // The webhook maintains this tag in real time, but a delivery lost while the
+    // app was down leaves it wrong until something corrects it — a product still
+    // tagged 'low-stock' after a bulk restock, or an untagged product quietly
+    // sitting on its last unit. The tag describes the *product*, so it is applied
+    // while any variant is low and only withdrawn once none of them is.
+    if (settings.enableAutoTag !== false) {
+      const lowStockTag = settings.lowStockTag || "low-stock";
+      const carriesLowStockTag = (firstItem.productTags || []).includes(lowStockTag);
+      const anyLow = anyVariantLowOnStock(
+        productItems.map((i) => ({
+          productId: i.productId,
+          variantId: i.variantId,
+          quantity: i.inventoryQuantity,
+        })),
+        settings,
+        customThresholds
+      );
+
+      if (anyLow !== carriesLowStockTag) {
+        const lowVariants = productItems.filter(
+          (i) =>
+            i.inventoryQuantity > 0 &&
+            i.threshold > 0 &&
+            i.inventoryQuantity <= i.threshold
+        );
+        try {
+          const mutation = anyLow
+            ? `#graphql
+                mutation tagsAdd($id: ID!, $tags: [String!]!) {
+                  tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+                }
+              `
+            : `#graphql
+                mutation tagsRemove($id: ID!, $tags: [String!]!) {
+                  tagsRemove(id: $id, tags: $tags) { userErrors { field message } }
+                }
+              `;
+          const res = await admin.graphql(mutation, {
+            variables: { id: productId, tags: [lowStockTag] },
+          });
+          const errs = collectGraphqlErrors(await res.json(), anyLow ? "tagsAdd" : "tagsRemove");
+          if (errs.length === 0 && anyLow) taggedCount++;
+
+          logsToCreate.push({
+            shop,
+            eventType: "LOW_STOCK",
+            productId,
+            productTitle: firstItem.productTitle,
+            variantId: lowVariants[0]?.variantId || "",
+            variantTitle: anyLow ? lowVariants.map((i) => i.variantTitle).join(", ") : variantSummary,
+            sku: lowVariants[0]?.sku || firstItem.sku,
+            quantity: anyLow ? lowVariants[0]?.inventoryQuantity ?? 0 : totalProdInventory,
+            actionTaken: anyLow
+              ? `Applied tag '${lowStockTag}' — ${lowVariants.length} variant(s) at or below their low-stock limit`
+              : `Removed tag '${lowStockTag}' — no variant is below its low-stock limit any more`,
+            status: errs.length > 0 ? "FAILED" : "SUCCESS",
+            details: errs.length > 0 ? errs.join(" | ") : null,
+          });
+        } catch (err) {
+          console.error("[Scan] Low stock tag reconciliation error:", err);
+        }
       }
     }
   }
@@ -1381,7 +1640,9 @@ export async function createAutomationLog(data) {
       eventType: data.eventType || "INFO",
       productId: data.productId || "",
       productTitle: data.productTitle || "",
+      variantId: data.variantId || "",
       variantTitle: data.variantTitle || "",
+      inventoryItemId: data.inventoryItemId || "",
       sku: data.sku || "",
       quantity: Number(data.quantity) || 0,
       actionTaken: data.actionTaken || "",
@@ -1558,13 +1819,23 @@ export function isHiddenForMode(product, visibilityMode) {
 }
 
 /**
- * Cancel restock jobs still queued for a product that has come back into stock.
+ * Cancel restock jobs still queued for stock that has come back.
  *
  * Those jobs exist only to recover from the stockout that scheduled them; once
- * the product is buyable again, firing one would auto-fill over the merchant's
- * own quantity and emit a second RESTOCK/ACTIVE action for the same recovery.
+ * the stock is there again, firing one would auto-fill over the merchant's own
+ * quantity and emit a second RESTOCK/ACTIVE action for the same recovery.
+ *
+ * Scope matters for a multi-variant product. An AUTO_FILL job refills one
+ * variant, so it is cancelled per variant — cancelling the whole product's jobs
+ * because a *different* variant was restocked is what left the remaining empty
+ * variants at 0 forever. An UNHIDE job acts on the product, so it stays
+ * product-scoped: pass no `variantId` for those.
  */
-export async function cancelPendingRestocks(shop, productId, { jobType = "AUTO_FILL", reason = "restocked" } = {}) {
+export async function cancelPendingRestocks(
+  shop,
+  productId,
+  { jobType = "AUTO_FILL", reason = "restocked", variantId = null } = {}
+) {
   if (!isDbConfigured() || !shop || !productId) return 0;
   try {
     await tryConnectDB();
@@ -1577,9 +1848,12 @@ export async function cancelPendingRestocks(shop, productId, { jobType = "AUTO_F
     if (jobType === "AUTO_FILL") filter.jobType = { $in: ["AUTO_FILL", null] };
     else if (jobType) filter.jobType = jobType;
 
+    if (variantId) filter.variantId = ensureGid(variantId, "ProductVariant");
+
     const { modifiedCount: count } = await ScheduledRestock.updateMany(filter, { $set: { status: "CANCELLED" } });
     if (count > 0) {
-      console.log(`[ScheduledRestock] Cancelled ${count} pending ${jobType || "any"} job(s) for ${reason} product ${productId}`);
+      const scope = variantId ? `variant ${variantId}` : `product ${productId}`;
+      console.log(`[ScheduledRestock] Cancelled ${count} pending ${jobType || "any"} job(s) for ${reason} ${scope}`);
     }
     return count;
   } catch (err) {
@@ -1974,7 +2248,15 @@ export async function fetchProductStockState(admin, productId) {
             seoHidden: metafield(namespace: "seo", key: "hidden") { value }
             variants(first: 100) {
               pageInfo { hasNextPage }
-              edges { node { id title inventoryQuantity } }
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  inventoryQuantity
+                  inventoryItem { id }
+                }
+              }
             }
           }
         }
@@ -1985,13 +2267,22 @@ export async function fetchProductStockState(admin, productId) {
     const product = json.data?.product;
     if (!product) return null;
 
+    const variants = (product.variants?.edges || []).map((e) => ({
+      id: e.node.id,
+      title: e.node.title,
+      sku: e.node.sku || "",
+      inventoryItemId: e.node.inventoryItem?.id || null,
+      quantity: e.node.inventoryQuantity ?? 0,
+    }));
+
     return {
       id: product.id,
       title: product.title,
       status: product.status,
       tags: product.tags || [],
       seoHidden: product.seoHidden?.value ?? null,
-      quantities: (product.variants?.edges || []).map((e) => e.node.inventoryQuantity ?? 0),
+      variants,
+      quantities: variants.map((v) => v.quantity),
       variantsTruncated: Boolean(product.variants?.pageInfo?.hasNextPage),
     };
   } catch (err) {
@@ -2037,7 +2328,13 @@ export async function scheduleProductRestock(
     finalLocationId = await getPrimaryLocationId(admin);
   }
 
-  // Prevent duplicate pending restock jobs for the same product.
+  // Prevent duplicate pending restock jobs.
+  //
+  // An AUTO_FILL job refills one variant, so the duplicate check is per variant:
+  // scoping it to the product meant the first empty variant's job blocked every
+  // other variant of the same product from ever being scheduled. An UNHIDE job
+  // acts on the product as a whole, so one per product is correct.
+  //
   // Jobs already past their scheduled time are stale (e.g. the in-memory timer was
   // lost on a server restart) and must not block a fresh schedule.
   const existingJob = plain(
@@ -2047,20 +2344,27 @@ export async function scheduleProductRestock(
       status: "PENDING",
       // Scoped per type: an unhide waiting out its delay must not block the
       // auto-fill a later stockout schedules, and vice versa.
-      ...(jobType === "AUTO_FILL" ? { jobType: { $in: ["AUTO_FILL", null] } } : { jobType }),
+      ...(jobType === "AUTO_FILL"
+        ? { jobType: { $in: ["AUTO_FILL", null] }, variantId: finalVariantId }
+        : { jobType }),
     }).lean()
   );
 
+  const jobScope = jobType === "AUTO_FILL" ? `${productTitle} / ${variantTitle || finalVariantId}` : productTitle;
+
   if (existingJob) {
     if (existingJob.scheduledAt > new Date()) {
-      console.log(`[ScheduledRestock] Job ${existingJob.id} is already PENDING for product ${productTitle} (scheduled for ${existingJob.scheduledAt.toISOString()})`);
-      return existingJob;
+      console.log(`[ScheduledRestock] Job ${existingJob.id} is already PENDING for ${jobScope} (scheduled for ${existingJob.scheduledAt.toISOString()})`);
+      // `created: false` lets the catalogue scan tell "I queued a recovery for
+      // this variant" from "one was already queued", so a scan running every
+      // minute does not re-log and re-email an unchanged stockout.
+      return { ...existingJob, created: false };
     }
     await ScheduledRestock.updateOne(
       { _id: existingJob.id },
       { $set: { status: "CANCELLED" } }
     );
-    console.log(`[ScheduledRestock] Cancelled stale overdue job ${existingJob.id} for product ${productTitle} and rescheduling`);
+    console.log(`[ScheduledRestock] Cancelled stale overdue job ${existingJob.id} for ${jobScope} and rescheduling`);
   }
 
   const record = plain(
@@ -2074,10 +2378,13 @@ export async function scheduleProductRestock(
       scheduledAt,
       status: "PENDING",
       jobType,
+      productTitle: productTitle || "",
+      variantTitle: variantTitle || "",
+      sku: sku || "",
     })
   );
 
-  console.log(`[ScheduledRestock] Created ${jobType} job ${record.id} for product ${productTitle} scheduled at ${scheduledAt.toISOString()} (delay: ${delayMs}ms, targetQuantity: ${targetQuantity})`);
+  console.log(`[ScheduledRestock] Created ${jobType} job ${record.id} for ${jobScope} scheduled at ${scheduledAt.toISOString()} (delay: ${delayMs}ms, targetQuantity: ${targetQuantity})`);
 
   // If delay is short (<= 24 hours), schedule in-memory timer
   if (delayMs >= 0 && delayMs <= 86400000) {
@@ -2091,7 +2398,7 @@ export async function scheduleProductRestock(
     }, delayMs);
   }
 
-  return record;
+  return { ...record, created: true };
 }
 
 /**
@@ -2129,6 +2436,14 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
 
   const inventoryItemId = ensureGid(record.inventoryItemId, "InventoryItem");
   const productId = ensureGid(record.productId, "Product");
+  const variantId = record.variantId ? ensureGid(record.variantId, "ProductVariant") : "";
+
+  // The job carries the names it was created with, so a job picked up by the
+  // cron after a restart still writes an audit entry that names the variant
+  // instead of the "Product Restock" placeholder.
+  const productTitle = record.productTitle || context.productTitle || "Product Restock";
+  const variantTitle = record.variantTitle || context.variantTitle || "";
+  const sku = record.sku || context.sku || "";
 
   let locationId = ensureGid(record.locationId, "Location");
   if (!locationId && inventoryItemId && adminClient) {
@@ -2171,11 +2486,13 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
       shop,
       eventType: "AUTO_FILL_RESTOCK",
       productId,
-      productTitle: context.productTitle || "Product Restock",
-      variantTitle: context.variantTitle || "",
-      sku: context.sku || "",
+      productTitle,
+      variantId,
+      variantTitle,
+      inventoryItemId,
+      sku,
       quantity: record.targetQuantity,
-      actionTaken: `[Scheduled Timer] Auto-fill to ${record.targetQuantity} units FAILED — product left hidden`,
+      actionTaken: `[Scheduled Timer] Auto-fill of variant '${variantTitle || "default"}' to ${record.targetQuantity} units FAILED — product left hidden`,
       status: "FAILED",
       details: autoFillError,
     });
@@ -2185,34 +2502,63 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
   }
 
   const isUnhideJob = record.jobType === "UNHIDE";
+  const didAutoFill = record.targetQuantity > 0;
 
-  // 2. Never un-hide a product that is still out of stock. Two jobs can reach this
-  // point without any stock behind them: an UNHIDE whose product sold out again
-  // while the delay ran, and a stockout-scheduled job with auto-fill switched off.
-  // The check is skipped right after a successful auto-fill, whose own mutation is
-  // the proof of stock and whose read-back can still be stale.
-  if (record.targetQuantity <= 0) {
-    const stockState = await fetchProductStockState(adminClient, productId);
-    if (stockState && !stockState.variantsTruncated) {
-      const stillStockedOut = evaluateStockoutCondition(stockState.quantities, settings.variantStrategy);
-      if (stillStockedOut) {
-        await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "CANCELLED" } });
-        await createAutomationLog({
-          shop,
-          eventType: isUnhideJob ? "SCHEDULED_UNHIDE" : "AUTO_FILL_RESTOCK",
-          productId,
-          productTitle: stockState.title || context.productTitle || "Product",
-          variantTitle: context.variantTitle || "",
-          sku: context.sku || "",
-          quantity: 0,
-          actionTaken: `[Scheduled Timer] Auto-unhide skipped — product still meets the ${settings.variantStrategy} stockout condition`,
-          status: "SUCCESS",
-          details: `Variant quantities: ${stockState.quantities.join(", ")}`,
-        });
-        console.log(`[ScheduledRestock] Job ${restockId} cancelled: ${productId} is still out of stock`);
-        // Skipped on purpose — not a failure, so the cron summary must not count it as one.
-        return { skipped: true, reason: "still-out-of-stock", productId };
-      }
+  // 2. Never un-hide a product that is still out of stock under the configured
+  // Variant Stockout Condition.
+  //
+  // This has to run for auto-fills too, not just for jobs that changed nothing:
+  // refilling one variant of a multi-variant product does not necessarily make
+  // the product buyable — under HIDE_ANY_OOS a single other empty variant still
+  // keeps it hidden. The variant this job just filled is overridden with its
+  // target quantity because the read-back immediately after the mutation can
+  // still report the pre-fill value.
+  const stockState = await fetchProductStockState(adminClient, productId);
+  if (stockState && !stockState.variantsTruncated) {
+    const liveQuantities = (stockState.variants || []).map((v) => {
+      const isFilledVariant =
+        didAutoFill &&
+        ((variantId && String(v.id) === String(variantId)) ||
+          (inventoryItemId && String(v.inventoryItemId) === String(inventoryItemId)));
+      return isFilledVariant ? record.targetQuantity : v.quantity;
+    });
+
+    const stillStockedOut =
+      liveQuantities.length > 0 && evaluateStockoutCondition(liveQuantities, settings.variantStrategy);
+
+    if (stillStockedOut) {
+      const emptyVariants = (stockState.variants || [])
+        .filter((_variant, i) => liveQuantities[i] <= 0)
+        .map((v) => v.title || v.id)
+        .join(", ");
+
+      // An auto-fill that succeeded is done work: the job is EXECUTED, only the
+      // un-hiding is withheld. A job that changed nothing is simply cancelled.
+      await ScheduledRestock.updateOne(
+        { _id: restockId },
+        { $set: { status: didAutoFill ? "EXECUTED" : "CANCELLED" } }
+      );
+
+      await createAutomationLog({
+        shop,
+        eventType: isUnhideJob ? "SCHEDULED_UNHIDE" : "AUTO_FILL_RESTOCK",
+        productId,
+        productTitle: stockState.title || productTitle,
+        variantId,
+        variantTitle,
+        inventoryItemId,
+        sku,
+        quantity: didAutoFill ? record.targetQuantity : 0,
+        actionTaken: didAutoFill
+          ? `[Scheduled Timer] Auto-filled variant '${variantTitle || "default"}' to ${record.targetQuantity} units — product kept hidden, it still meets the ${settings.variantStrategy} stockout condition`
+          : `[Scheduled Timer] Auto-unhide skipped — product still meets the ${settings.variantStrategy} stockout condition`,
+        status: "SUCCESS",
+        details: `Variant quantities: ${liveQuantities.join(", ")}${emptyVariants ? ` | still empty: ${emptyVariants}` : ""}`,
+      });
+
+      console.log(`[ScheduledRestock] Job ${restockId}: ${productId} still meets the stockout condition (${liveQuantities.join(", ")})`);
+      // Skipped on purpose — not a failure, so the cron summary must not count it as one.
+      return { skipped: true, reason: "still-out-of-stock", productId, filled: didAutoFill };
     }
   }
 
@@ -2261,9 +2607,10 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
   await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "EXECUTED" } });
 
   // Create log entry
+  const variantLabel = variantTitle ? ` variant '${variantTitle}'` : "";
   const filledSummary =
     record.targetQuantity > 0
-      ? `Auto-filled stock to ${record.targetQuantity} units & ${restored.action} [${restored.mode}]`
+      ? `Auto-filled${variantLabel} stock to ${record.targetQuantity} units & ${restored.action} [${restored.mode}]`
       : isUnhideJob
         ? `Restock delay elapsed — removed tag '${tagToRemove}' & ${restored.action} [${restored.mode}]`
         : `Removed tag '${tagToRemove}' & ${restored.action} [${restored.mode}] (auto-fill disabled)`;
@@ -2272,17 +2619,35 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
     shop,
     eventType: isUnhideJob ? "SCHEDULED_UNHIDE" : "AUTO_FILL_RESTOCK",
     productId,
-    productTitle: context.productTitle || "Product Restocked",
-    variantTitle: context.variantTitle || "",
-    sku: context.sku || "",
+    productTitle,
+    variantId,
+    variantTitle,
+    inventoryItemId,
+    sku,
     quantity: record.targetQuantity,
     actionTaken: `[Scheduled Timer] ${filledSummary}`,
     status: warnings.length > 0 ? "PARTIAL" : "SUCCESS",
     details: warnings.length > 0 ? warnings.join(" | ") : null,
   });
 
+  if (settings.enableEmailAlerts !== false && settings.notifyOnRestock !== false) {
+    import("./email.server.js").then(({ sendMerchantInventoryEmail }) => {
+      sendMerchantInventoryEmail(shop, {
+        eventType: "RESTOCK",
+        productId,
+        productTitle,
+        variantId,
+        variantTitle,
+        sku,
+        quantity: record.targetQuantity,
+        settings,
+      }).catch((emailErr) => console.error("[ScheduledRestock] Restock email alert error:", emailErr));
+    });
+  }
+
   console.log(`[ScheduledRestock] Executed restock job ${restockId} successfully!`);
   return record;
+
 }
 
 /**

@@ -117,8 +117,8 @@ export const action = async ({ request }) => {
       return { success: true, subscription: updatedSub };
     }
 
-    const priceMap = { GROWTH: 3.99, PRO: 15.99, ENTERPRISE: 29.99 };
-    const price = priceMap[plan] || 15.99;
+    const priceMap = { GROWTH: 5.99, PRO: 19.99, ENTERPRISE: 39.99 };
+    const price = priceMap[plan] || 19.99;
     // Shopify admin resolves app deep links by client_id, so the API key is the only
     // segment guaranteed to exist. Using the app name/handle 404s whenever the handle
     // registered on the app differs from SHOPIFY_APP_NAME.
@@ -220,20 +220,39 @@ export const action = async ({ request }) => {
     };
   }
 
-  // Only the fields this form actually renders are sent. The automation toggles
-  // (enableAutoTag / enableAutoHide / enableAutoPublish / enableEmailAlerts) live on
-  // the Rules page and have no checkbox here, so submitting `formData.has(...)` for
-  // them posted false and silently switched the whole automation off every time a
-  // merchant saved an unrelated field on this page.
+  if (intent === "save_email_settings") {
+    const emailAlertsRaw = formData.get("enableEmailAlerts");
+    const stockoutRaw = formData.get("notifyOnStockout");
+    const restockRaw = formData.get("notifyOnRestock");
+
+    const updated = await updateInventorySettings(session.shop, {
+      enableEmailAlerts: emailAlertsRaw === "on" || emailAlertsRaw === "true",
+      alertEmail: formData.get("alertEmail"),
+      notifyOnStockout: stockoutRaw === "on" || stockoutRaw === "true",
+      notifyOnRestock: restockRaw === "on" || restockRaw === "true",
+    });
+
+    return { success: true, settings: updated, type: "save_email_settings" };
+  }
+
+  const emailAlertsRaw = formData.get("enableEmailAlerts");
+  const stockoutRaw = formData.get("notifyOnStockout");
+  const restockRaw = formData.get("notifyOnRestock");
+
   const updated = await updateInventorySettings(session.shop, {
     defaultLowStockLimit: formData.get("defaultLowStockLimit"),
     outOfStockTag: formData.get("outOfStockTag"),
     leadTimeDays: formData.get("leadTimeDays"),
     targetStockDays: formData.get("targetStockDays"),
+    enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
+    alertEmail: formData.get("alertEmail"),
+    notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
+    notifyOnRestock: restockRaw !== null ? (restockRaw === "on" || restockRaw === "true") : undefined,
   });
 
   return { success: true, settings: updated };
 };
+
 
 export default function Settings() {
   const { shop, settings, subscription: loaderSub, supportTickets: initialTickets, initialTab, chargeApproved, activatedPlan } = useLoaderData();
@@ -262,6 +281,19 @@ export default function Settings() {
   const [activeTicket, setActiveTicket] = useState(null);
   const [replyText, setReplyText] = useState("");
   const [replyStatus, setReplyStatus] = useState("RESOLVED");
+
+  // Email Notification Preferences State
+  const [emailAlertsEnabled, setEmailAlertsEnabled] = useState(settings?.enableEmailAlerts !== false);
+  const [notifyStockout, setNotifyStockout] = useState(settings?.notifyOnStockout !== false);
+  const [notifyRestock, setNotifyRestock] = useState(settings?.notifyOnRestock !== false);
+
+  useEffect(() => {
+    if (settings) {
+      setEmailAlertsEnabled(settings.enableEmailAlerts !== false);
+      setNotifyStockout(settings.notifyOnStockout !== false);
+      setNotifyRestock(settings.notifyOnRestock !== false);
+    }
+  }, [settings]);
 
   const isSendingSupport = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "send_support_request";
 
@@ -321,7 +353,8 @@ export default function Settings() {
     }
   }, [fetcher.data, currentPlan, shopify]);
 
-  const isSubmitting = fetcher.state === "submitting";
+  const isSavingThresholds = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_thresholds";
+  const isSavingEmail = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_email_settings";
   const isChangingPlan = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "change_plan";
   const targetPlan = isChangingPlan ? fetcher.formData?.get("plan") : null;
 
@@ -499,6 +532,7 @@ export default function Settings() {
 
           {/* Global Preferences Form */}
           <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="save_thresholds" />
             <div className="table-card" style={{ padding: "24px" }}>
               <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#312e81" }}>
                 Global Preferences &amp; Threshold Defaults
@@ -553,12 +587,102 @@ export default function Settings() {
               </div>
 
               <div style={{ marginTop: "20px", display: "flex", justifyContent: "flex-end" }}>
-                <button type="submit" className="btn-primary" disabled={isSubmitting}>
-                  {isSubmitting ? "Saving..." : "Save Preferences"}
+                <button type="submit" className="btn-primary" disabled={isSavingThresholds}>
+                  {isSavingThresholds ? "Saving..." : "Save Threshold Settings"}
                 </button>
               </div>
             </div>
           </fetcher.Form>
+
+          {/* Email Notifications Preferences Form */}
+          <fetcher.Form method="post" style={{ marginTop: "24px" }}>
+            <input type="hidden" name="intent" value="save_email_settings" />
+            <div className="table-card" style={{ padding: "24px" }}>
+              <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#312e81" }}>
+                Merchant Email Notifications (Resend Integration)
+              </h2>
+              <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "20px" }}>
+                Receive transactional email notifications directly to your inbox whenever inventory items go out of stock or are restocked.
+              </p>
+
+              <div className="form-switch" style={{ marginBottom: "20px", background: "#f8fafc", padding: "16px", borderRadius: "10px", border: "1px solid #e2e8f0" }}>
+                <div>
+                  <strong style={{ display: "block", fontSize: "14px", color: "#0f172a" }}>Enable Merchant Email Notifications</strong>
+                  <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                    Master toggle to enable email notifications for inventory updates
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  name="enableEmailAlerts"
+                  checked={emailAlertsEnabled}
+                  onChange={(e) => setEmailAlertsEnabled(e.target.checked)}
+                  style={{ width: "20px", height: "20px", cursor: "pointer" }}
+                />
+              </div>
+
+              {emailAlertsEnabled && (
+                <>
+                  <div className="form-group" style={{ marginBottom: "20px" }}>
+                    <label className="form-label" htmlFor="field-alertEmail">Recipient Email Address</label>
+                    <input id="field-alertEmail"
+                      type="email"
+                      name="alertEmail"
+                      defaultValue={settings.alertEmail || ""}
+                      className="form-input"
+                      placeholder={`Default: ${shop}`}
+                    />
+                    <span style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px", display: "block" }}>
+                      Target inbox for out-of-stock and restock alerts. Leave blank to default to your myshopify store handle.
+                    </span>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", background: "#faf5ff", padding: "16px", borderRadius: "10px", border: "1px solid #e9d5ff" }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
+                      <input
+                        type="checkbox"
+                        id="field-notifyOnStockout"
+                        name="notifyOnStockout"
+                        checked={notifyStockout}
+                        onChange={(e) => setNotifyStockout(e.target.checked)}
+                        style={{ marginTop: "3px", width: "18px", height: "18px", cursor: "pointer" }}
+                      />
+                      <label htmlFor="field-notifyOnStockout" style={{ cursor: "pointer" }}>
+                        <strong style={{ display: "block", fontSize: "14px", color: "#581c87" }}>Out of Stock Alert</strong>
+                        <span style={{ fontSize: "12px", color: "#7e22ce" }}>
+                          Send email when item drops from &gt;0 to 0 units
+                        </span>
+                      </label>
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
+                      <input
+                        type="checkbox"
+                        id="field-notifyOnRestock"
+                        name="notifyOnRestock"
+                        checked={notifyRestock}
+                        onChange={(e) => setNotifyRestock(e.target.checked)}
+                        style={{ marginTop: "3px", width: "18px", height: "18px", cursor: "pointer" }}
+                      />
+                      <label htmlFor="field-notifyOnRestock" style={{ cursor: "pointer" }}>
+                        <strong style={{ display: "block", fontSize: "14px", color: "#065f46" }}>Restocked Alert</strong>
+                        <span style={{ fontSize: "12px", color: "#047857" }}>
+                          Send email when item increases from 0 to &gt;0 units
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <div style={{ marginTop: "24px", display: "flex", justifyContent: "flex-end" }}>
+                <button type="submit" className="btn-primary" disabled={isSavingEmail}>
+                  {isSavingEmail ? "Saving..." : "Save Email Settings"}
+                </button>
+              </div>
+            </div>
+          </fetcher.Form>
+
         </>
       )}
 
@@ -599,16 +723,16 @@ export default function Settings() {
                 </span>
                 <h3 style={{ margin: 0, fontSize: "18px", color: "#ffffff", fontWeight: "700" }}>
                   {selectedPlan === "FREE" && "Starter / Free Plan ($0/mo)"}
-                  {selectedPlan === "GROWTH" && "Growth Plan ($3.99/mo)"}
-                  {selectedPlan === "PRO" && "Pro Plan ($15.99/mo)"}
-                  {selectedPlan === "ENTERPRISE" && "Enterprise Plan ($29.99/mo)"}
+                  {selectedPlan === "GROWTH" && "Growth Plan ($5.99/mo)"}
+                  {selectedPlan === "PRO" && "Pro Plan ($19.99/mo)"}
+                  {selectedPlan === "ENTERPRISE" && "Enterprise Plan ($39.99/mo)"}
                 </h3>
               </div>
               <p style={{ margin: 0, fontSize: "13px", color: "#cbd5e1" }}>
-                {selectedPlan === "FREE" && "Up to 50 active items with basic tagging. Upgrade anytime to unlock automated hiding & restock delays."}
-                {selectedPlan === "GROWTH" && "Up to 500 active items with auto-hiding, tagging, and restock delay automation."}
-                {selectedPlan === "PRO" && "Up to 5,000 items with AI Stockout Radar, storefront widget, & safety stock buffer rules."}
-                {selectedPlan === "ENTERPRISE" && "Unlimited item capacity with custom vendor rules, dedicated support, and webhook triggers."}
+                {selectedPlan === "FREE" && "Up to 50 active items with basic tagging. Upgrade anytime to unlock automated hiding, restock delays & merchant email alerts."}
+                {selectedPlan === "GROWTH" && "Up to 500 active items with auto-hiding, tagging, restock delay automation & merchant email notifications."}
+                {selectedPlan === "PRO" && "Up to 5,000 items with AI Stockout Radar, storefront widget, safety stock rules & instant email alerts."}
+                {selectedPlan === "ENTERPRISE" && "Unlimited item capacity with custom vendor rules, dedicated support, real-time email & webhook triggers."}
               </p>
             </div>
 
@@ -668,20 +792,23 @@ export default function Settings() {
                   <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
                     <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
                     <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Up to <strong>50 active products</strong>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Up to <strong>50 active products</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Basic out-of-stock tagging
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Basic out-of-stock tagging</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Manual inventory sync triggers
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Manual inventory sync triggers</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> 7 days activity audit logs
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>7 days activity audit logs</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#94a3b8", fontWeight: "bold" }}>✓</span> Standard community support
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#94a3b8", fontWeight: "bold", lineHeight: "1.4" }}>✕</span> <span style={{ color: "#94a3b8" }}>Merchant Email Notifications</span>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Standard community support</span>
                       </li>
                     </ul>
                   </div>
@@ -729,7 +856,7 @@ export default function Settings() {
                   </div>
                   <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Growth Plan</h3>
                   <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
-                    $3.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                    $5.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
                   </div>
                   <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
                     Best value for growing SMB stores wanting core automation &amp; auto-hiding.
@@ -738,23 +865,26 @@ export default function Settings() {
                   <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
                     <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
                     <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Up to <strong>500 active products</strong>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Up to <strong>500 active products</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Auto-hiding out-of-stock items
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Auto-hiding out-of-stock items</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Auto-publishing back in stock
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Auto-publishing back in stock</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Dynamic restock delay rules
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Dynamic restock delay rules</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> 30 days activity audit logs
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Merchant Email Notifications</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Standard email support
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>30 days activity audit logs</span>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Standard email support</span>
                       </li>
                     </ul>
                   </div>
@@ -802,7 +932,7 @@ export default function Settings() {
                   </div>
                   <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Pro Plan</h3>
                   <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
-                    $15.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                    $19.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
                   </div>
                   <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
                     For expanding stores needing intelligence, Stockout Risk Radar &amp; theme widgets.
@@ -811,23 +941,26 @@ export default function Settings() {
                   <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
                     <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
                     <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Up to <strong>5,000 active items</strong>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Up to <strong>5,000 active items</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> <strong>Everything in Growth</strong>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Everything in Growth</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Stockout Risk Radar &amp; velocity
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Stockout Risk Radar &amp; velocity</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Storefront Back-in-Stock widget
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Storefront Back-in-Stock widget</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> 90 days activity audit logs
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Instant Resend Email Alerts</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Priority email support
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>90 days activity audit logs</span>
+                      </li>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Priority email support</span>
                       </li>
                     </ul>
                   </div>
@@ -875,7 +1008,7 @@ export default function Settings() {
                   </div>
                   <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Enterprise Plan</h3>
                   <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
-                    $29.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                    $39.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
                   </div>
                   <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
                     For high-volume merchants with massive catalogs &amp; custom lead-time requirements.
@@ -884,23 +1017,23 @@ export default function Settings() {
                   <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "14px", marginBottom: "20px" }}>
                     <div style={{ fontSize: "11px", fontWeight: "700", color: "#475569", textTransform: "uppercase", marginBottom: "10px" }}>Included Features:</div>
                     <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> <strong>Unlimited active items</strong>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Unlimited active items</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> <strong>Everything in Pro</strong>
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Everything in Pro</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Custom lead-time rules per vendor
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Custom lead-time rules per vendor</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Webhook &amp; custom flow triggers
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Real-Time Email &amp; Webhook Alerts</strong></span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Unlimited audit log retention
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Unlimited audit log retention</span>
                       </li>
-                      <li style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span style={{ color: "#10b981", fontWeight: "bold" }}>✓</span> Dedicated account manager &amp; 24/7 SLA
+                      <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Dedicated account manager &amp; 24/7 SLA</span>
                       </li>
                     </ul>
                   </div>
@@ -933,9 +1066,9 @@ export default function Settings() {
                 <tr>
                   <th style={{ width: "30%" }}>Feature</th>
                   <th style={{ width: "17.5%", textAlign: "center" }}>Starter ($0)</th>
-                  <th style={{ width: "17.5%", textAlign: "center" }}>Growth ($3.99)</th>
-                  <th style={{ width: "17.5%", textAlign: "center" }}>Pro ($15.99)</th>
-                  <th style={{ width: "17.5%", textAlign: "center" }}>Enterprise ($29.99)</th>
+                  <th style={{ width: "17.5%", textAlign: "center" }}>Growth ($5.99)</th>
+                  <th style={{ width: "17.5%", textAlign: "center" }}>Pro ($19.99)</th>
+                  <th style={{ width: "17.5%", textAlign: "center" }}>Enterprise ($39.99)</th>
                 </tr>
               </thead>
               <tbody>

@@ -78,6 +78,8 @@ const inventorySettingsSchema = new Schema(
     removeFromCollectionId: { type: String, default: "" },
     enableEmailAlerts: { type: Boolean, default: true },
     alertEmail: { type: String, default: "" },
+    notifyOnStockout: { type: Boolean, default: true },
+    notifyOnRestock: { type: Boolean, default: true },
     leadTimeDays: { type: Number, default: 14 },
     targetStockDays: { type: Number, default: 30 },
   },
@@ -100,6 +102,12 @@ const automationRuleSchema = new Schema(
     shop: { type: String, required: true },
     name: { type: String, required: true },
     enabled: { type: Boolean, default: true },
+    // Written by createAutomationRule. Declared here because Mongoose silently
+    // drops undeclared paths in strict mode, which lost every rule definition.
+    trigger: { type: String, default: "inventory_levels/update" },
+    conditions: { type: String, default: "" },
+    actions: { type: String, default: "" },
+    status: { type: String, default: "ACTIVE" },
     condition: { type: String, default: "INVENTORY_ZERO" },
     action: { type: String, default: "HIDE_PRODUCT" },
     config: { type: Schema.Types.Mixed, default: {} },
@@ -107,18 +115,43 @@ const automationRuleSchema = new Schema(
   { ...timestamps, collection: "automationrules" }
 );
 
+/**
+ * InventoryEvent — one row per inventory_levels/update webhook.
+ *
+ * The unit of tracking is the *inventory item at a location*, which is exactly
+ * one variant at one location. Everything downstream (the zero-crossing
+ * classification, webhook idempotency, observed sales velocity) reads back the
+ * previous row for the same `inventoryItemId` + `locationId`, so those two
+ * fields — not productId — are what must be stored and indexed.
+ *
+ * `productId` / `variantId` are filled in once the webhook has resolved them and
+ * are optional: the event is recorded before that lookup, so the idempotency
+ * check can short-circuit a duplicate delivery without paying for a GraphQL call.
+ */
 const inventoryEventSchema = new Schema(
   {
     shop: { type: String, required: true },
-    productId: { type: String, required: true },
-    variantId: { type: String, required: true },
-    oldQuantity: { type: Number, required: true },
+    inventoryItemId: { type: String, required: true },
+    productId: { type: String, default: null },
+    variantId: { type: String, default: null },
+    locationId: { type: String, default: null },
+    // null on the first observation of an item — the previous quantity is
+    // genuinely unknown then, which is not the same as zero.
+    oldQuantity: { type: Number, default: null },
     newQuantity: { type: Number, required: true },
-    timestamp: { type: Date, default: Date.now },
+    eventType: { type: String, default: "INITIAL" },
+    webhookId: { type: String, default: null },
   },
-  { timestamps: false, collection: "inventoryevents" }
+  { timestamps: { createdAt: true, updatedAt: false }, collection: "inventoryevents" }
 );
-inventoryEventSchema.index({ shop: 1, productId: 1, variantId: 1, timestamp: -1 });
+inventoryEventSchema.index({ shop: 1, inventoryItemId: 1, locationId: 1, createdAt: -1 });
+inventoryEventSchema.index({ shop: 1, variantId: 1, createdAt: -1 });
+// The real idempotency guard: two deliveries of the same webhook race past the
+// find-then-create check, and only a unique index stops the second one.
+inventoryEventSchema.index(
+  { webhookId: 1 },
+  { unique: true, partialFilterExpression: { webhookId: { $type: "string" } } }
+);
 
 const automationLogSchema = new Schema(
   {
@@ -126,7 +159,12 @@ const automationLogSchema = new Schema(
     eventType: { type: String, default: "INFO" },
     productId: { type: String, default: "" },
     productTitle: { type: String, default: "" },
+    // Which variant the entry is about. Without it a multi-variant product's
+    // audit trail cannot be read per variant, and the email de-duplication
+    // window suppresses a second variant's alert as if it were a repeat.
+    variantId: { type: String, default: "" },
     variantTitle: { type: String, default: "" },
+    inventoryItemId: { type: String, default: "" },
     sku: { type: String, default: null },
     quantity: { type: Number, default: 0 },
     actionTaken: { type: String, default: "" },
@@ -137,6 +175,7 @@ const automationLogSchema = new Schema(
 );
 automationLogSchema.index({ shop: 1, productId: 1 });
 automationLogSchema.index({ shop: 1, createdAt: -1 });
+automationLogSchema.index({ shop: 1, productId: 1, variantId: 1, createdAt: -1 });
 
 const subscriptionSchema = new Schema(
   {
@@ -163,11 +202,20 @@ const scheduledRestockSchema = new Schema(
     // UNHIDE: scheduled when the merchant restocks, applies the configured delay
     // before removing the out-of-stock tag and reversing the visibility mode.
     jobType: { type: String, default: "AUTO_FILL" },
+    // Carried on the job so the durable cron path can write an audit entry that
+    // names the product and variant. The in-process timer passed them through
+    // context; a job picked up after a restart had nothing to name.
+    productTitle: { type: String, default: "" },
+    variantTitle: { type: String, default: "" },
+    sku: { type: String, default: "" },
   },
   { timestamps: { createdAt: true, updatedAt: false }, collection: "scheduledrestocks" }
 );
 scheduledRestockSchema.index({ shop: 1, status: 1, scheduledAt: 1 });
 scheduledRestockSchema.index({ status: 1, scheduledAt: 1 });
+// AUTO_FILL jobs are per variant, so both the duplicate check and the cancel
+// sweep have to be able to select one variant's jobs out of a product's.
+scheduledRestockSchema.index({ shop: 1, productId: 1, variantId: 1, status: 1 });
 
 const supportTicketSchema = new Schema(
   {

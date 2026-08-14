@@ -1,17 +1,29 @@
-import { useState, useEffect } from "react";
-import { useLoaderData, useRouteError } from "react-router";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { data, useLoaderData, useRouteError, useRevalidator } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getAutomationLogs } from "../models/inventory.server";
 
+// Audit logs are written by webhooks/scans at any time, so neither the browser
+// nor any proxy in front of the app may hold on to a previous response.
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+  Pragma: "no-cache",
+  Expires: "0",
+};
+
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const logs = await getAutomationLogs(session.shop, 500);
-  return { logs };
+  // `data()` keeps React Router's own serialization (so `headers` below reach
+  // both the document and the `.data` request) instead of a hand-rolled Response.
+  return data({ logs }, { headers: NO_STORE_HEADERS });
 };
 
 export default function AutomationLogs() {
   const { logs } = useLoaderData();
+  const revalidator = useRevalidator();
+
   const [filterType, setFilterType] = useState("ALL");
   const [search, setSearch] = useState("");
 
@@ -24,11 +36,51 @@ export default function AutomationLogs() {
     setCurrentPage(1);
   }, [filterType, search, pageSize]);
 
+  const isRefreshing = revalidator.state === "loading";
+
+  // `revalidator` is a new object every render; keep it in a ref so the
+  // listener effect below subscribes once instead of on every render.
+  const revalidatorRef = useRef(revalidator);
+  revalidatorRef.current = revalidator;
+
+  const handleRefresh = useCallback(() => {
+    const current = revalidatorRef.current;
+    if (current.state === "idle") current.revalidate();
+  }, []);
+
+  // Re-run the loader whenever the merchant comes back to the tab, so logs
+  // written by a scan on another page are picked up without a manual click.
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") handleRefresh();
+    };
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    window.addEventListener("focus", refreshIfVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+      window.removeEventListener("focus", refreshIfVisible);
+    };
+  }, [handleRefresh]);
+
+  // Timestamps are formatted in the viewer's timezone, which the server cannot
+  // know. Render them only after hydration so SSR and client markup agree.
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => setHydrated(true), []);
+
+  const [lastUpdated, setLastUpdated] = useState(null);
+  useEffect(() => {
+    if (revalidator.state === "idle") setLastUpdated(new Date());
+  }, [revalidator.state, logs]);
+
   const filteredLogs = logs.filter((log) => {
+    const term = search.toLowerCase();
     const matchesSearch =
-      log.productTitle.toLowerCase().includes(search.toLowerCase()) ||
-      log.actionTaken.toLowerCase().includes(search.toLowerCase()) ||
-      (log.sku && log.sku.toLowerCase().includes(search.toLowerCase()));
+      log.productTitle.toLowerCase().includes(term) ||
+      log.actionTaken.toLowerCase().includes(term) ||
+      // Variant title is searchable so a multi-variant product's trail can be
+      // narrowed to the one variant the merchant is investigating.
+      (log.variantTitle && log.variantTitle.toLowerCase().includes(term)) ||
+      (log.sku && log.sku.toLowerCase().includes(term));
 
     if (!matchesSearch) return false;
     if (filterType !== "ALL" && log.eventType !== filterType) return false;
@@ -51,18 +103,26 @@ export default function AutomationLogs() {
           <h1>Automation Audit Trail &amp; Logs</h1>
           <p>Real-time log of every automatic action, tag modification, product status change, and alert</p>
         </div>
-        <span className="stock-badge-active">
-          <span className="pulse-dot"></span>
-          Live Audit Logging
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          {isRefreshing && (
+            <span style={{ fontSize: "12px", color: "#4f46e5", background: "#e0e7ff", padding: "4px 10px", borderRadius: "12px", fontWeight: "600" }}>
+              Refreshing...
+            </span>
+          )}
+          <span className="stock-badge-active">
+            <span className="pulse-dot"></span>
+            Live Audit Logging
+          </span>
+        </div>
       </div>
+
 
       <div className="table-card">
         <div className="table-header">
           <div>
             <h2 className="table-title">Activity Logs ({totalLogs})</h2>
             <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "var(--text-muted)" }}>
-              Sorted by latest timestamp
+              Sorted by latest timestamp {hydrated && lastUpdated ? `(Updated ${lastUpdated.toLocaleTimeString()})` : ""}
             </p>
           </div>
 
@@ -115,8 +175,13 @@ export default function AutomationLogs() {
             ) : (
               paginatedLogs.map((log) => (
                 <tr key={log.id}>
-                  <td style={{ fontSize: "12px", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
-                    {new Date(log.createdAt).toLocaleString()}
+                  <td
+                    style={{ fontSize: "12px", color: "var(--text-muted)", whiteSpace: "nowrap" }}
+                    suppressHydrationWarning
+                  >
+                    {hydrated
+                      ? new Date(log.createdAt).toLocaleString()
+                      : new Date(log.createdAt).toISOString().replace("T", " ").slice(0, 19) + " UTC"}
                   </td>
                   <td>
                     <span
@@ -172,7 +237,7 @@ export default function AutomationLogs() {
         <div
           style={{
             display: "flex",
-            justify: "space-between",
+            justifyContent: "space-between",
             alignItems: "center",
             padding: "16px 20px",
             borderTop: "1px solid var(--border-color)",
@@ -261,6 +326,8 @@ export function ErrorBoundary() {
   return boundary.error(useRouteError());
 }
 
+// Merge the loader's no-store headers with the Shopify headers set by the
+// parent `app` route — a bare object here would drop the embedded-app headers.
 export const headers = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
