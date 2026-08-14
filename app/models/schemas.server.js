@@ -82,6 +82,7 @@ const inventorySettingsSchema = new Schema(
     notifyOnRestock: { type: Boolean, default: true },
     leadTimeDays: { type: Number, default: 14 },
     targetStockDays: { type: Number, default: 30 },
+    reviewPromptDismissed: { type: Boolean, default: false },
   },
   { ...timestamps, collection: "inventorysettings" }
 );

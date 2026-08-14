@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
-import { useLoaderData, useFetcher, useRouteError } from "react-router";
+import { Link, useLoaderData, useFetcher, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
   getInventorySettings,
   updateInventorySettings,
+  getShopSubscription,
   syncSubscriptionFromShopify,
   createAutomationLog,
   createSupportTicket,
@@ -97,17 +98,23 @@ export const action = async ({ request }) => {
   // Shopify Billing. Leaving a second copy here meant two places could grant a
   // tier, and this one did it without verifying the charge.
 
+  const subscription = await getShopSubscription(session.shop);
+  const plan = getPlan(subscription?.plan);
+  const { features } = plan;
+
   if (intent === "save_email_settings") {
     const emailAlertsRaw = formData.get("enableEmailAlerts");
     const stockoutRaw = formData.get("notifyOnStockout");
     const restockRaw = formData.get("notifyOnRestock");
 
-    const updated = await updateInventorySettings(session.shop, {
+    const emailData = features.emailAlerts ? {
       enableEmailAlerts: emailAlertsRaw === "on" || emailAlertsRaw === "true",
       alertEmail: formData.get("alertEmail"),
       notifyOnStockout: stockoutRaw === "on" || stockoutRaw === "true",
       notifyOnRestock: restockRaw === "on" || restockRaw === "true",
-    });
+    } : {};
+
+    const updated = await updateInventorySettings(session.shop, emailData);
 
     return { success: true, settings: updated, type: "save_email_settings" };
   }
@@ -121,10 +128,12 @@ export const action = async ({ request }) => {
     outOfStockTag: formData.get("outOfStockTag"),
     leadTimeDays: formData.get("leadTimeDays"),
     targetStockDays: formData.get("targetStockDays"),
-    enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
-    alertEmail: formData.get("alertEmail"),
-    notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
-    notifyOnRestock: restockRaw !== null ? (restockRaw === "on" || restockRaw === "true") : undefined,
+    ...(features.emailAlerts ? {
+      enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
+      alertEmail: formData.get("alertEmail"),
+      notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
+      notifyOnRestock: restockRaw !== null ? (restockRaw === "on" || restockRaw === "true") : undefined,
+    } : {}),
   });
 
   return { success: true, settings: updated };
@@ -402,17 +411,36 @@ export default function Settings() {
           {/* Email Notifications Preferences Form */}
           <fetcher.Form method="post" style={{ marginTop: "24px" }}>
             <input type="hidden" name="intent" value="save_email_settings" />
-            <div className="table-card" style={{ padding: "24px" }}>
-              <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#312e81" }}>
-                Merchant Email Notifications (Resend Integration)
-              </h2>
+            <div className="table-card" style={{ padding: "24px", opacity: plan?.features?.emailAlerts ? 1 : 0.75 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                <h2 style={{ fontSize: "18px", margin: 0, color: "#312e81" }}>
+                  Merchant Email Notifications (Resend Integration)
+                </h2>
+                {!plan?.features?.emailAlerts && (
+                  <Link
+                    to="/app/plan"
+                    style={{
+                      background: "#fef3c7",
+                      color: "#92400e",
+                      border: "1px solid #fcd34d",
+                      padding: "4px 10px",
+                      borderRadius: "12px",
+                      fontSize: "11px",
+                      fontWeight: "700",
+                      textDecoration: "none",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                    }}
+                  >
+                    Growth Feature
+                  </Link>
+                )}
+              </div>
               <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "20px" }}>
                 Receive transactional email notifications directly to your inbox whenever inventory items go out of stock or are restocked.
               </p>
 
-              {/* Merchant email notifications start at Growth. The preferences stay
-                  editable so they survive a downgrade, but nothing is sent until the
-                  plan covers them — which is what the engine enforces. */}
               {!plan?.features?.emailAlerts && (
                 <div
                   style={{
@@ -429,13 +457,12 @@ export default function Settings() {
                   }}
                 >
                   <span style={{ fontSize: "13px", color: "#3730a3" }}>
-                    🔒 Merchant email notifications are not included in the{" "}
-                    <strong>{plan?.name}</strong> plan — no alerts are sent while these
-                    preferences are saved.
+                    Merchant email notifications are not included in the{" "}
+                    <strong>{plan?.name}</strong> plan — controls are disabled until you upgrade to a plan that includes email alerts.
                   </span>
-                  <a href="/app/plan" style={{ fontSize: "13px", fontWeight: 600, color: "#4f46e5" }}>
+                  <Link to="/app/plan" className="btn-primary" style={{ textDecoration: "none", fontSize: "13px", padding: "6px 14px" }}>
                     Upgrade to Growth →
-                  </a>
+                  </Link>
                 </div>
               )}
 
@@ -449,9 +476,10 @@ export default function Settings() {
                 <input
                   type="checkbox"
                   name="enableEmailAlerts"
-                  checked={emailAlertsEnabled}
+                  checked={Boolean(plan?.features?.emailAlerts && emailAlertsEnabled)}
+                  disabled={!plan?.features?.emailAlerts}
                   onChange={(e) => setEmailAlertsEnabled(e.target.checked)}
-                  style={{ width: "20px", height: "20px", cursor: "pointer" }}
+                  style={{ width: "20px", height: "20px", cursor: plan?.features?.emailAlerts ? "pointer" : "not-allowed" }}
                 />
               </div>
 
@@ -459,12 +487,14 @@ export default function Settings() {
                 <>
                   <div className="form-group" style={{ marginBottom: "20px" }}>
                     <label className="form-label" htmlFor="field-alertEmail">Recipient Email Address</label>
-                    <input id="field-alertEmail"
+                    <input
+                      id="field-alertEmail"
                       type="email"
                       name="alertEmail"
                       defaultValue={settings.alertEmail || ""}
                       className="form-input"
                       placeholder={`Default: ${shop}`}
+                      disabled={!plan?.features?.emailAlerts}
                     />
                     <span style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px", display: "block" }}>
                       Target inbox for out-of-stock and restock alerts. Leave blank to default to your myshopify store handle.
@@ -478,10 +508,11 @@ export default function Settings() {
                         id="field-notifyOnStockout"
                         name="notifyOnStockout"
                         checked={notifyStockout}
+                        disabled={!plan?.features?.emailAlerts}
                         onChange={(e) => setNotifyStockout(e.target.checked)}
-                        style={{ marginTop: "3px", width: "18px", height: "18px", cursor: "pointer" }}
+                        style={{ marginTop: "3px", width: "18px", height: "18px", cursor: plan?.features?.emailAlerts ? "pointer" : "not-allowed" }}
                       />
-                      <label htmlFor="field-notifyOnStockout" style={{ cursor: "pointer" }}>
+                      <label htmlFor="field-notifyOnStockout" style={{ cursor: plan?.features?.emailAlerts ? "pointer" : "not-allowed" }}>
                         <strong style={{ display: "block", fontSize: "14px", color: "#581c87" }}>Out of Stock Alert</strong>
                         <span style={{ fontSize: "12px", color: "#7e22ce" }}>
                           Send email when item drops from &gt;0 to 0 units
@@ -495,10 +526,11 @@ export default function Settings() {
                         id="field-notifyOnRestock"
                         name="notifyOnRestock"
                         checked={notifyRestock}
+                        disabled={!plan?.features?.emailAlerts}
                         onChange={(e) => setNotifyRestock(e.target.checked)}
-                        style={{ marginTop: "3px", width: "18px", height: "18px", cursor: "pointer" }}
+                        style={{ marginTop: "3px", width: "18px", height: "18px", cursor: plan?.features?.emailAlerts ? "pointer" : "not-allowed" }}
                       />
-                      <label htmlFor="field-notifyOnRestock" style={{ cursor: "pointer" }}>
+                      <label htmlFor="field-notifyOnRestock" style={{ cursor: plan?.features?.emailAlerts ? "pointer" : "not-allowed" }}>
                         <strong style={{ display: "block", fontSize: "14px", color: "#065f46" }}>Restocked Alert</strong>
                         <span style={{ fontSize: "12px", color: "#047857" }}>
                           Send email when item increases from 0 to &gt;0 units
@@ -510,7 +542,7 @@ export default function Settings() {
               )}
 
               <div style={{ marginTop: "24px", display: "flex", justifyContent: "flex-end" }}>
-                <button type="submit" className="btn-primary" disabled={isSavingEmail}>
+                <button type="submit" className="btn-primary" disabled={isSavingEmail || !plan?.features?.emailAlerts}>
                   {isSavingEmail ? "Saving..." : "Save Email Settings"}
                 </button>
               </div>

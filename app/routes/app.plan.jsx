@@ -106,7 +106,7 @@ export const action = async ({ request }) => {
       return { success: true, subscription: updatedSub };
     }
 
-    const priceMap = { GROWTH: 5.99, PRO: 19.99, ENTERPRISE: 39.99 };
+    const priceMap = { GROWTH: 9.99, PRO: 19.99, ENTERPRISE: 49.99 };
     const price = priceMap[plan] || 19.99;
     const appIdentifier = (
       process.env.SHOPIFY_API_KEY ||
@@ -312,9 +312,9 @@ export default function PlanPage() {
             </span>
             <h3 style={{ margin: 0, fontSize: "18px", color: "#ffffff", fontWeight: "700" }}>
               {selectedPlan === "FREE" && "Starter / Free Plan ($0/mo)"}
-              {selectedPlan === "GROWTH" && "Growth Plan ($5.99/mo)"}
+              {selectedPlan === "GROWTH" && "Growth Plan ($9.99/mo)"}
               {selectedPlan === "PRO" && "Pro Plan ($19.99/mo)"}
-              {selectedPlan === "ENTERPRISE" && "Enterprise Plan ($39.99/mo)"}
+              {selectedPlan === "ENTERPRISE" && "Enterprise Plan ($49.99/mo)"}
             </h3>
           </div>
           <p style={{ margin: 0, fontSize: "13px", color: "#cbd5e1" }}>
@@ -435,7 +435,7 @@ export default function PlanPage() {
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
                 <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", background: "#e0e7ff", color: "#3730a3", padding: "3px 8px", borderRadius: "12px" }}>
-                  MOST POPULAR
+                  BASIC AUTOMATION
                 </span>
                 {selectedPlan === "GROWTH" && (
                   <span style={{ fontSize: "11px", fontWeight: "700", background: "#4f46e5", color: "#ffffff", padding: "3px 8px", borderRadius: "12px" }}>
@@ -445,7 +445,7 @@ export default function PlanPage() {
               </div>
               <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Growth Plan</h3>
               <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
-                $5.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                $9.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
               </div>
               <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
                 Best value for growing SMB stores wanting core automation &amp; auto-hiding.
@@ -481,9 +481,9 @@ export default function PlanPage() {
 
             <button
               onClick={() => handlePlanSelect("GROWTH")}
-              className="btn-primary"
+              className="btn-secondary"
               disabled={isChangingPlan}
-              style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", background: "#4f46e5", opacity: isChangingPlan ? 0.7 : 1 }}
+              style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
             >
               {isChangingPlan && targetPlan === "GROWTH"
                 ? "Processing..."
@@ -496,7 +496,7 @@ export default function PlanPage() {
           {/* Pro Tier */}
           <div
             style={{
-              border: selectedPlan === "PRO" ? "2px solid #4f46e5" : "1px solid #fed7aa",
+              border: selectedPlan === "PRO" ? "2px solid #4f46e5" : "1px solid #c7d2fe",
               borderRadius: "14px",
               padding: "22px",
               background: selectedPlan === "PRO" ? "#f5f3ff" : "#ffffff",
@@ -504,17 +504,17 @@ export default function PlanPage() {
               flexDirection: "column",
               justifyContent: "space-between",
               position: "relative",
-              boxShadow: selectedPlan === "PRO" ? "0 4px 14px rgba(79, 70, 229, 0.12)" : "0 2px 8px rgba(0,0,0,0.04)",
+              boxShadow: selectedPlan === "PRO" ? "0 4px 16px rgba(79, 70, 229, 0.16)" : "0 2px 8px rgba(0,0,0,0.04)",
               transition: "all 0.2s ease",
             }}
           >
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", background: "#ffedd5", color: "#c2410c", padding: "3px 8px", borderRadius: "12px" }}>
-                  BEST VALUE
+                <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", background: "#4f46e5", color: "#ffffff", padding: "3px 10px", borderRadius: "12px" }}>
+                  MOST POPULAR 🔥
                 </span>
                 {selectedPlan === "PRO" && (
-                  <span style={{ fontSize: "11px", fontWeight: "700", background: "#4f46e5", color: "#ffffff", padding: "3px 8px", borderRadius: "12px" }}>
+                  <span style={{ fontSize: "11px", fontWeight: "700", background: "#312e81", color: "#ffffff", padding: "3px 8px", borderRadius: "12px" }}>
                     CURRENT PLAN
                   </span>
                 )}
@@ -557,9 +557,9 @@ export default function PlanPage() {
 
             <button
               onClick={() => handlePlanSelect("PRO")}
-              className="btn-secondary"
+              className="btn-primary"
               disabled={isChangingPlan}
-              style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
+              style={{ width: "100%", padding: "10px", fontWeight: "600", borderRadius: "8px", background: "#4f46e5", opacity: isChangingPlan ? 0.7 : 1 }}
             >
               {isChangingPlan && targetPlan === "PRO"
                 ? "Processing..."
@@ -597,7 +597,7 @@ export default function PlanPage() {
               </div>
               <h3 style={{ margin: "0 0 6px 0", fontSize: "18px", color: "#0f172a" }}>Enterprise Plan</h3>
               <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
-                $39.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
+                $49.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
               </div>
               <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
                 For high-volume merchants with massive catalogs &amp; custom lead-time requirements.
@@ -655,9 +655,9 @@ export default function PlanPage() {
             <tr>
               <th style={{ width: "30%" }}>Feature</th>
               <th style={{ width: "17.5%", textAlign: "center" }}>Starter ($0)</th>
-              <th style={{ width: "17.5%", textAlign: "center" }}>Growth ($5.99)</th>
+              <th style={{ width: "17.5%", textAlign: "center" }}>Growth ($9.99)</th>
               <th style={{ width: "17.5%", textAlign: "center" }}>Pro ($19.99)</th>
-              <th style={{ width: "17.5%", textAlign: "center" }}>Enterprise ($39.99)</th>
+              <th style={{ width: "17.5%", textAlign: "center" }}>Enterprise ($49.99)</th>
             </tr>
           </thead>
           <tbody>

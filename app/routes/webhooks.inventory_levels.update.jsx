@@ -287,6 +287,21 @@ export const action = async ({ request }) => {
         }).catch((emailErr) => console.error("[Webhook] Non-blocking stockout email alert error:", emailErr));
       }
 
+      // Guard: Merchant-managed DRAFT or ARCHIVED products must never be automated
+      const isArchived = product.status === "ARCHIVED";
+      const existingTags = Array.isArray(product.tags) ? product.tags : [];
+      const tagToApply = settings.outOfStockTag || "out-of-stock";
+      const isDraftNotAppHidden =
+        product.status === "DRAFT" &&
+        (settings.visibilityMode !== "DRAFT" || !existingTags.includes(tagToApply));
+
+      if (isArchived || isDraftNotAppHidden) {
+        console.log(
+          `[Webhook] ${product.title} is ${product.status} (manually set by merchant) — skipping stockout automations`
+        );
+        return;
+      }
+
       // Gated on auto-fill alone: with it off the job would carry a target of 0
       // and every empty variant's job would repeat the same product-level
       // untag/unhide. The Restock Delay still applies — it sets when this runs.

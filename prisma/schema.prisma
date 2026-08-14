@@ -55,6 +55,7 @@ model InventorySettings {
   notifyOnRestock        Boolean  @default(true)
   leadTimeDays           Int      @default(14)
   targetStockDays        Int      @default(30)
+  reviewPromptDismissed  Boolean  @default(false)
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }

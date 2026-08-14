@@ -25,9 +25,9 @@ export const PLAN_NAMES = {
 
 export const PLAN_PRICES = {
   FREE: 0,
-  GROWTH: 5.99,
+  GROWTH: 9.99,
   PRO: 19.99,
-  ENTERPRISE: 39.99,
+  ENTERPRISE: 49.99,
 };
 
 /**

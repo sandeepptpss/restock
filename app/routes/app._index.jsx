@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useLoaderData, useFetcher, useRouteError } from "react-router";
+import { Link, useLoaderData, useFetcher, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -10,9 +10,10 @@ import {
   updateInventoryQuantity,
   setProductThreshold,
   processPendingScheduledRestocks,
-  getShopSubscription,
-  updateShopSubscription,
+  syncSubscriptionFromShopify,
   createAutomationLog,
+  hasSuccessfulAutomation,
+  updateInventorySettings,
 } from "../models/inventory.server";
 import { checkPlanLimitStatus } from "../utils/planLimits";
 
@@ -24,28 +25,35 @@ export const loader = async ({ request }) => {
   const chargeApproved = url.searchParams.get("charge_approved");
   const planToActivate = url.searchParams.get("plan");
 
+  // Reconcile stored subscription against Shopify Billing API to prevent unauthorized query parameter manipulation
+  const { subscription, changed } = await syncSubscriptionFromShopify(admin, shop);
+
   let activatedPlan = null;
   if (chargeApproved === "true" && planToActivate) {
-    await updateShopSubscription(shop, planToActivate);
-    activatedPlan = planToActivate;
-    await createAutomationLog({
-      shop,
-      eventType: "BILLING_ACTIVATE",
-      productId: "N/A",
-      productTitle: `Subscription Upgraded to ${planToActivate}`,
-      variantTitle: "Shopify Billing Confirmed",
-      sku: "N/A",
-      quantity: 0,
-      actionTaken: `Merchant confirmed Shopify billing approval. Activated ${planToActivate} plan features.`,
-      status: "SUCCESS",
-    });
+    const confirmed = subscription?.plan === planToActivate.toUpperCase();
+    activatedPlan = confirmed ? subscription.plan : null;
+    if (confirmed && changed) {
+      await createAutomationLog({
+        shop,
+        eventType: "BILLING_ACTIVATE",
+        productId: "N/A",
+        productTitle: `Subscription Upgraded to ${subscription.plan}`,
+        variantTitle: "Shopify Billing Confirmed",
+        sku: "N/A",
+        quantity: 0,
+        actionTaken: `Shopify billing confirmed active ${subscription.plan} subscription. Enabled plan features.`,
+        status: "SUCCESS",
+      });
+    }
   }
 
   await processPendingScheduledRestocks(admin, shop, { limit: 10 });
 
   const inventoryData = await fetchShopifyInventory(admin, shop);
   const recentLogs = await getAutomationLogs(shop, 10);
-  const subscription = await getShopSubscription(shop);
+  const hasAutomationSuccess =
+    (await hasSuccessfulAutomation(shop)) ||
+    (recentLogs && recentLogs.some((l) => l.status === "SUCCESS"));
 
   return {
     shop,
@@ -56,6 +64,7 @@ export const loader = async ({ request }) => {
     subscription,
     chargeApproved: chargeApproved === "true",
     activatedPlan,
+    hasAutomationSuccess,
   };
 };
 
@@ -68,6 +77,11 @@ export const action = async ({ request }) => {
   if (intent === "run_scan") {
     const result = await runStockoutAutomationScan(admin, shop);
     return { success: true, type: "scan", result };
+  }
+
+  if (intent === "dismiss_review_prompt") {
+    await updateInventorySettings(shop, { reviewPromptDismissed: true });
+    return { success: true, type: "dismiss_review_prompt" };
   }
 
   if (intent === "update_stock") {
@@ -106,7 +120,7 @@ export const action = async ({ request }) => {
 };
 
 export default function Dashboard() {
-  const { shop, items, settings, primaryLocationId, recentLogs, subscription, chargeApproved, activatedPlan } = useLoaderData();
+  const { shop, items, settings, primaryLocationId, recentLogs, subscription, chargeApproved, activatedPlan, hasAutomationSuccess } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -117,6 +131,21 @@ export default function Dashboard() {
   const [thresholdVal, setThresholdVal] = useState("");
   const [dismissChecklist, setDismissChecklist] = useState(false);
   const [showSuccessBanner, setShowSuccessBanner] = useState(Boolean(chargeApproved && activatedPlan));
+  const [dismissedReviewPrompt, setDismissedReviewPrompt] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.localStorage.getItem("stockshield_review_dismissed") === "true") {
+      setDismissedReviewPrompt(true);
+    }
+  }, []);
+
+  const handleDismissReviewPrompt = () => {
+    setDismissedReviewPrompt(true);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("stockshield_review_dismissed", "true");
+    }
+    fetcher.submit({ intent: "dismiss_review_prompt" }, { method: "POST" });
+  };
 
   useEffect(() => {
     if (chargeApproved && activatedPlan) {
@@ -262,6 +291,95 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* In-App Review Prompt Banner */}
+      {hasAutomationSuccess && !settings?.reviewPromptDismissed && !dismissedReviewPrompt && (
+        <div
+          style={{
+            background: "linear-gradient(135deg, #fefce8 0%, #fffbebe6 100%)",
+            border: "1px solid #fde68a",
+            borderLeft: "4px solid #f59e0b",
+            borderRadius: "12px",
+            padding: "16px 20px",
+            marginBottom: "20px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            boxShadow: "0 4px 12px rgba(245, 158, 11, 0.08)",
+            flexWrap: "wrap",
+            gap: "16px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "14px", flex: "1 1 300px" }}>
+            <div
+              style={{
+                width: "42px",
+                height: "42px",
+                borderRadius: "10px",
+                background: "#fef3c7",
+                border: "1px solid #fde68a",
+                color: "#d97706",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "22px",
+                flexShrink: 0,
+              }}
+            >
+              ⭐
+            </div>
+            <div>
+              <h3 style={{ margin: "0 0 3px 0", fontSize: "15px", color: "#78350f", fontWeight: "700" }}>
+                Enjoying StockShield? ⭐
+              </h3>
+              <p style={{ margin: 0, fontSize: "13px", color: "#92400e", lineHeight: "1.4" }}>
+                StockShield is automating your inventory so you can spend less time managing stock. We&apos;d love to hear your feedback on the Shopify App Store.
+              </p>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+            <a
+              href="https://apps.shopify.com/stockshield#modal-show=write-review"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={handleDismissReviewPrompt}
+              style={{
+                background: "#d97706",
+                color: "#ffffff",
+                textDecoration: "none",
+                padding: "8px 16px",
+                fontSize: "13px",
+                fontWeight: "600",
+                borderRadius: "8px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                boxShadow: "0 2px 4px rgba(217, 119, 6, 0.2)",
+                transition: "all 0.15s ease",
+              }}
+            >
+              ⭐ Leave a Review
+            </a>
+            <button
+              type="button"
+              onClick={handleDismissReviewPrompt}
+              style={{
+                background: "#ffffff",
+                color: "#78350f",
+                border: "1px solid #fde68a",
+                padding: "8px 14px",
+                fontSize: "13px",
+                fontWeight: "600",
+                borderRadius: "8px",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
+            >
+              Maybe Later
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Clean Top Header Bar */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "16px" }}>
         <div>
@@ -340,8 +458,8 @@ export default function Dashboard() {
               </p>
             </div>
           </div>
-          <a
-            href="/app/plan"
+          <Link
+            to="/app/plan"
             className="btn-primary"
             style={{
               background: "#dc2626",
@@ -354,7 +472,7 @@ export default function Dashboard() {
             }}
           >
             Upgrade to {targetUpgradePlan} &rarr;
-          </a>
+          </Link>
         </div>
       )}
 

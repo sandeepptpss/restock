@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { data, useLoaderData, useRouteError, useRevalidator } from "react-router";
+import { data, Link, useLoaderData, useRouteError, useRevalidator } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getAutomationLogs, getShopSubscription } from "../models/inventory.server";
@@ -112,7 +112,7 @@ export default function AutomationLogs() {
             ) : (
               <>
                 Showing the last {plan?.logRetentionDays} days — audit retention on the{" "}
-                {plan?.name} plan. <a href="/app/plan">Upgrade for longer history</a>.
+                {plan?.name} plan. <Link to="/app/plan">Upgrade for longer history</Link>.
               </>
             )}
           </p>

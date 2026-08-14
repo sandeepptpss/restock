@@ -96,6 +96,7 @@ const DEFAULT_SETTINGS = (shop) => ({
   notifyOnRestock: true,
   leadTimeDays: 14,
   targetStockDays: 30,
+  reviewPromptDismissed: false,
 });
 
 /**
@@ -182,6 +183,7 @@ export async function updateInventorySettings(shop, data) {
     notifyOnRestock: data.notifyOnRestock != null ? Boolean(data.notifyOnRestock) : (existing.notifyOnRestock ?? true),
     leadTimeDays: data.leadTimeDays != null ? (Number(data.leadTimeDays) || 14) : existing.leadTimeDays,
     targetStockDays: data.targetStockDays != null ? (Number(data.targetStockDays) || 30) : existing.targetStockDays,
+    reviewPromptDismissed: data.reviewPromptDismissed != null ? Boolean(data.reviewPromptDismissed) : (existing.reviewPromptDismissed ?? false),
   };
 
   const updated = await InventorySettings.findOneAndUpdate(
@@ -1134,6 +1136,19 @@ export async function runStockoutAutomationScan(admin, shop) {
       );
     }
 
+    // Guard: Merchant-managed DRAFT or ARCHIVED products must never be automated
+    const isArchived = firstItem.productStatus === "ARCHIVED";
+    const isDraftNotAppHidden =
+      firstItem.productStatus === "DRAFT" &&
+      (settings.visibilityMode !== "DRAFT" || !(firstItem.productTags || []).includes(settings.outOfStockTag));
+
+    if (isArchived || isDraftNotAppHidden) {
+      console.log(
+        `[Scan] ${firstItem.productTitle} is ${firstItem.productStatus} (manually set by merchant) — skipping automations`
+      );
+      continue;
+    }
+
     // 0a. PER-VARIANT RECOVERY — runs whatever the product-level decision is.
     //
     // Hiding is a product-level action and rightly waits for the configured
@@ -1578,6 +1593,24 @@ export async function getAutomationLogs(shop, limit = 50) {
   } catch (err) {
     console.warn("Error fetching automationLogs:", err.message);
     return [];
+  }
+}
+
+/**
+ * Check whether a merchant has experienced at least one successful automation
+ */
+export async function hasSuccessfulAutomation(shop) {
+  if (!isDbConfigured() || !shop) return false;
+  try {
+    await tryConnectDB();
+    const count = await AutomationLog.countDocuments({
+      shop,
+      status: "SUCCESS",
+    });
+    return count > 0;
+  } catch (err) {
+    console.warn("Error checking hasSuccessfulAutomation:", err.message);
+    return false;
   }
 }
 

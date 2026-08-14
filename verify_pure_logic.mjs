@@ -150,8 +150,8 @@ assert(
   "DRAFT Mode: Product is visible when status = ACTIVE"
 );
 assert(
-  needsVisibilityRestore({ status: "DRAFT", seoHidden: null }, "DRAFT") === true,
-  "DRAFT Mode: Product needs restore when status = DRAFT"
+  needsVisibilityRestore({ status: "DRAFT", tags: ["out-of-stock"] }, "DRAFT") === true,
+  "DRAFT Mode: Product needs restore when status = DRAFT and has app out-of-stock tag"
 );
 
 // Mode C: Keep Product Visible (Apply Out-of-Stock Tag Only) [TAG_ONLY]
@@ -164,12 +164,12 @@ assert(
   "TAG_ONLY Mode: No status restore required for active visible product"
 );
 assert(
-  needsVisibilityRestore({ status: "DRAFT", seoHidden: null }, "TAG_ONLY") === true,
-  "TAG_ONLY Mode: Needs restore if product is currently DRAFT"
+  needsVisibilityRestore({ status: "DRAFT", tags: ["out-of-stock"] }, "DRAFT", { outOfStockTag: "out-of-stock" }) === true,
+  "TAG_ONLY Mode: Needs restore if product was app-drafted"
 );
 assert(
-  needsVisibilityRestore({ status: "ACTIVE", seoHidden: "1" }, "TAG_ONLY") === true,
-  "TAG_ONLY Mode: Needs restore if product currently has seo.hidden = 1"
+  needsVisibilityRestore({ status: "ACTIVE", seoHidden: "1" }, "ACTIVE_HIDDEN") === true,
+  "ACTIVE_HIDDEN Mode: Needs restore if product currently has seo.hidden = 1"
 );
 
 // Mode D: Unpublish from Online Store Channel [UNPUBLISH_CHANNEL]

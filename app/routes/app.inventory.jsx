@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useLoaderData, useRouteError } from "react-router";
+import { Link, useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -125,7 +125,12 @@ export default function StockRadar() {
           className="table-card"
           style={{ padding: "48px 24px", textAlign: "center", maxWidth: "640px", margin: "0 auto" }}
         >
-          <div style={{ fontSize: "40px", lineHeight: 1, marginBottom: "16px" }}>🔒</div>
+          <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "56px", height: "56px", borderRadius: "16px", background: "#e0e7ff", color: "#4338ca", marginBottom: "16px" }}>
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </div>
           <h2 style={{ margin: "0 0 8px 0", fontSize: "20px", color: "#312e81" }}>
             Stockout Risk Radar is a Pro feature
           </h2>
@@ -136,9 +141,9 @@ export default function StockRadar() {
           <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: "0 0 24px 0" }}>
             Your store is on the <strong>{plan?.name}</strong> plan.
           </p>
-          <a href="/app/plan" className="btn-primary" style={{ textDecoration: "none" }}>
+          <Link to="/app/plan" className="btn-primary" style={{ textDecoration: "none" }}>
             View plans &amp; upgrade
-          </a>
+          </Link>
         </div>
       </div>
     );
@@ -203,8 +208,8 @@ export default function StockRadar() {
               </p>
             </div>
           </div>
-          <a
-            href="/app/plan"
+          <Link
+            to="/app/plan"
             className="btn-primary"
             style={{
               background: "#dc2626",
@@ -217,7 +222,7 @@ export default function StockRadar() {
             }}
           >
             Upgrade to {targetUpgradePlan} &rarr;
-          </a>
+          </Link>
         </div>
       )}
 

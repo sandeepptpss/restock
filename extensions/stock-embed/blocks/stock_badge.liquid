@@ -37,7 +37,7 @@
 
 <script>
   (function() {
-    {% if block.settings.hide_sold_out_collections == true %}
+    {% if block.settings.hide_sold_out_collections == true or block.settings.hide_sold_out_collections == nil %}
     function autoHideSoldOutCollectionCards() {
       // Do not hide main product display on single product pages
       var path = window.location.pathname || '';
@@ -62,14 +62,19 @@
         cards.forEach(function(card) {
           if (card.getAttribute('data-stockshield-checked') === 'true') return;
 
-          // Check if card contains a Sold out indicator
-          var badge = card.querySelector('.badge, .badge--bottom-left, .price--sold-out, .sold-out, .badge--sold-out, .card__badge');
+          // Check if card contains a Sold out indicator badge or tag
+          var badge = card.querySelector('.badge, .badge--bottom-left, .price--sold-out, .sold-out, .badge--sold-out, .card__badge, .price__badge-sold-out, .badge--out-of-stock, [data-sold-out]');
           var text = badge ? badge.textContent : card.textContent;
 
-          if (badge && /sold\s*out/i.test(badge.textContent)) {
+          if (badge && /sold\s*out|out\s*of\s*stock/i.test(badge.textContent)) {
             card.style.setProperty('display', 'none', 'important');
             card.setAttribute('data-stockshield-checked', 'true');
-          } else if (/sold\s*out/i.test(text) && (card.querySelector('.price--sold-out') || card.querySelector('.badge'))) {
+          } else if (
+            card.querySelector('.price--sold-out') ||
+            card.querySelector('.badge--sold-out') ||
+            card.querySelector('.badge--out-of-stock') ||
+            /sold\s*out/i.test(text) && (card.querySelector('.badge') || card.querySelector('.price'))
+          ) {
             card.style.setProperty('display', 'none', 'important');
             card.setAttribute('data-stockshield-checked', 'true');
           }
@@ -114,7 +119,7 @@
       "type": "checkbox",
       "id": "hide_sold_out_collections",
       "label": "Auto-Hide Sold Out Items from Collection & Search Grids",
-      "default": false
+      "default": true
     }
   ]
 }

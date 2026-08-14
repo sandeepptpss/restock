@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useLoaderData, useFetcher, useRouteError } from "react-router";
+import { Link, useLoaderData, useFetcher, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -19,9 +19,6 @@ export const loader = async ({ request }) => {
   const subscription = await getShopSubscription(session.shop);
 
   return {
-    // The merchant's own choices, not the plan-clamped ones the engine acts on:
-    // a downgrade must not look like the app forgot what they configured. The
-    // banner below says which of them the current plan actually runs.
     settings,
     totalItems: inventoryData.items.length,
     subscription,
@@ -32,26 +29,37 @@ export const loader = async ({ request }) => {
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
+  const subscription = await getShopSubscription(session.shop);
+  const plan = getPlan(subscription?.plan);
+  const { features } = plan;
 
   const data = {
     defaultLowStockLimit: formData.get("defaultLowStockLimit"),
-    visibilityMode: formData.get("visibilityMode") || "ACTIVE_HIDDEN",
     variantStrategy: formData.get("variantStrategy") || "HIDE_ALL_OOS",
-    restockDelayValue: formData.get("restockDelayValue"),
-    restockDelayUnit: formData.get("restockDelayUnit") || "IMMEDIATE",
-    enableAutoFill: formData.has("enableAutoFill"),
-    autoFillQuantity: formData.get("autoFillQuantity"),
-    enableAutoTag: formData.has("enableAutoTag"),
-    enableAutoHide: formData.has("enableAutoHide"),
     outOfStockTag: formData.get("outOfStockTag") || "out-of-stock",
     lowStockTag: formData.get("lowStockTag") || "low-stock",
-    enableAutoPublish: formData.has("enableAutoPublish") ? formData.get("enableAutoPublish") === "on" : true,
-    outOfStockCollectionId: formData.get("outOfStockCollectionId"),
-    removeFromCollectionId: formData.get("removeFromCollectionId"),
-    enableEmailAlerts: formData.has("enableEmailAlerts"),
-    alertEmail: formData.get("alertEmail"),
     leadTimeDays: formData.get("leadTimeDays"),
     targetStockDays: formData.get("targetStockDays"),
+    enableAutoTag: formData.has("enableAutoTag"),
+    // Only update gated settings if the current plan includes the feature,
+    // avoiding unintentional wipes when disabled form fields are omitted in submit.
+    ...(features.autoHide ? {
+      visibilityMode: formData.get("visibilityMode") || "ACTIVE_HIDDEN",
+      enableAutoHide: formData.has("enableAutoHide"),
+      enableAutoPublish: formData.has("enableAutoPublish") ? formData.get("enableAutoPublish") === "on" : true,
+    } : {}),
+    ...(features.autoFill ? {
+      enableAutoFill: formData.has("enableAutoFill"),
+      autoFillQuantity: formData.get("autoFillQuantity"),
+    } : {}),
+    ...(features.restockDelay ? {
+      restockDelayValue: formData.get("restockDelayValue"),
+      restockDelayUnit: formData.get("restockDelayUnit") || "IMMEDIATE",
+    } : {}),
+    ...(features.emailAlerts ? {
+      enableEmailAlerts: formData.has("enableEmailAlerts"),
+      alertEmail: formData.get("alertEmail"),
+    } : {}),
   };
 
   const updated = await updateInventorySettings(session.shop, data);
@@ -61,8 +69,6 @@ export const action = async ({ request }) => {
   return { success: true, settings: updated };
 };
 
-// The automations the engine will refuse to run, given the plan. Kept in the
-// same order as the rules below so the banner reads like the form.
 const PLAN_GATED_RULES = [
   ["autoHide", "Auto-hide sold-out products"],
   ["autoPublish", "Auto-publish back-in-stock products"],
@@ -109,6 +115,11 @@ export default function AutomationRules() {
     shopify?.toast?.show?.("Restock & Flow rules updated successfully");
   };
 
+  const canRestockDelay = Boolean(plan?.features?.restockDelay);
+  const canAutoFill = Boolean(plan?.features?.autoFill);
+  const canAutoHide = Boolean(plan?.features?.autoHide);
+  const canAutoTag = Boolean(plan?.features?.autoTag);
+
   return (
     <div className="stock-container">
       {/* Header Banner */}
@@ -143,16 +154,15 @@ export default function AutomationRules() {
         >
           <div>
             <strong style={{ display: "block", fontSize: "14px", color: "#312e81", marginBottom: "4px" }}>
-              🔒 Not included in the {plan?.name} plan
+              Locked Features in the {plan?.name} Plan
             </strong>
             <span style={{ fontSize: "13px", color: "#4338ca" }}>
-              {lockedRules.map(([, label]) => label).join(" · ")} — these settings are saved, but
-              stay switched off until your plan covers them. Out-of-stock tagging keeps running.
+              {lockedRules.map(([, label]) => label).join(" · ")} — these features are disabled on your current tier. Upgrade your plan to unlock and activate them.
             </span>
           </div>
-          <a href="/app/plan" className="btn-primary" style={{ textDecoration: "none", whiteSpace: "nowrap" }}>
-            Compare plans
-          </a>
+          <Link to="/app/plan" className="btn-primary" style={{ textDecoration: "none", whiteSpace: "nowrap" }}>
+            Compare &amp; Upgrade Plans →
+          </Link>
         </div>
       )}
 
@@ -199,8 +209,8 @@ export default function AutomationRules() {
               </p>
             </div>
           </div>
-          <a
-            href="/app/plan"
+          <Link
+            to="/app/plan"
             className="btn-primary"
             style={{
               background: "#dc2626",
@@ -213,7 +223,7 @@ export default function AutomationRules() {
             }}
           >
             Upgrade to {targetUpgradePlan} &rarr;
-          </a>
+          </Link>
         </div>
       )}
 
@@ -303,17 +313,18 @@ export default function AutomationRules() {
           <div
             style={{
               background: "#ffffff",
-              border: "2px solid #0284c7",
+              border: `2px solid ${canAutoFill ? "#0284c7" : "#cbd5e1"}`,
               borderRadius: "14px",
               padding: "16px",
-              boxShadow: "0 4px 6px -1px rgba(2, 132, 199, 0.1)",
+              opacity: canAutoFill ? 1 : 0.6,
+              boxShadow: canAutoFill ? "0 4px 6px -1px rgba(2, 132, 199, 0.1)" : "none",
             }}
           >
-            <div style={{ fontSize: "11px", fontWeight: "800", color: "#0284c7", textTransform: "uppercase", letterSpacing: "1px" }}>
-              STEP 2 • AUTO-FILL
+            <div style={{ fontSize: "11px", fontWeight: "800", color: canAutoFill ? "#0284c7" : "#64748b", textTransform: "uppercase", letterSpacing: "1px" }}>
+              STEP 2 • AUTO-FILL {!canAutoFill && "[Locked]"}
             </div>
             <strong style={{ display: "block", fontSize: "14px", margin: "6px 0 4px 0", color: "#0f172a" }}>
-              {autoFillEnabled ? `Auto-Fill +${settings.autoFillQuantity || 10} Units` : "Manual / Supplier Quantity"}
+              {canAutoFill && autoFillEnabled ? `Auto-Fill +${settings.autoFillQuantity || 10} Units` : canAutoFill ? "Manual Quantity" : "Requires Growth Plan"}
             </strong>
             <p style={{ margin: 0, fontSize: "12px", color: "var(--text-muted)" }}>
               Inventory level initialized
@@ -326,17 +337,18 @@ export default function AutomationRules() {
           <div
             style={{
               background: "#ffffff",
-              border: "2px solid #f59e0b",
+              border: `2px solid ${canRestockDelay ? "#f59e0b" : "#cbd5e1"}`,
               borderRadius: "14px",
               padding: "16px",
-              boxShadow: "0 4px 6px -1px rgba(245, 158, 11, 0.1)",
+              opacity: canRestockDelay ? 1 : 0.6,
+              boxShadow: canRestockDelay ? "0 4px 6px -1px rgba(245, 158, 11, 0.1)" : "none",
             }}
           >
-            <div style={{ fontSize: "11px", fontWeight: "800", color: "#d97706", textTransform: "uppercase", letterSpacing: "1px" }}>
-              STEP 3 • UNHIDE TIMER
+            <div style={{ fontSize: "11px", fontWeight: "800", color: canRestockDelay ? "#d97706" : "#64748b", textTransform: "uppercase", letterSpacing: "1px" }}>
+              STEP 3 • UNHIDE TIMER {!canRestockDelay && "[Locked]"}
             </div>
             <strong style={{ display: "block", fontSize: "14px", margin: "6px 0 4px 0", color: "#0f172a" }}>
-              {restockDelayUnit === "IMMEDIATE" ? "Immediate Unhide" : `Delay ${settings.restockDelayValue || 0} ${restockDelayUnit}`}
+              {canRestockDelay ? (restockDelayUnit === "IMMEDIATE" ? "Immediate Unhide" : `Delay ${settings.restockDelayValue || 0} ${restockDelayUnit}`) : "Immediate (Free Plan)"}
             </strong>
             <p style={{ margin: 0, fontSize: "12px", color: "var(--text-muted)" }}>
               Buffer time before making item visible
@@ -349,17 +361,18 @@ export default function AutomationRules() {
           <div
             style={{
               background: "#ffffff",
-              border: "2px solid #10b981",
+              border: `2px solid ${canAutoHide ? "#10b981" : "#cbd5e1"}`,
               borderRadius: "14px",
               padding: "16px",
-              boxShadow: "0 4px 6px -1px rgba(16, 185, 129, 0.1)",
+              opacity: canAutoHide ? 1 : 0.6,
+              boxShadow: canAutoHide ? "0 4px 6px -1px rgba(16, 185, 129, 0.1)" : "none",
             }}
           >
-            <div style={{ fontSize: "11px", fontWeight: "800", color: "#059669", textTransform: "uppercase", letterSpacing: "1px" }}>
-              STEP 4 • AUTO-UNHIDE
+            <div style={{ fontSize: "11px", fontWeight: "800", color: canAutoHide ? "#059669" : "#64748b", textTransform: "uppercase", letterSpacing: "1px" }}>
+              STEP 4 • AUTO-UNHIDE {!canAutoHide && "[Locked]"}
             </div>
             <strong style={{ display: "block", fontSize: "15px", margin: "6px 0 4px 0", color: "#0f172a" }}>
-              Status &rarr; ACTIVE
+              {canAutoHide ? "Status → ACTIVE" : "Tag Only (Free Plan)"}
             </strong>
             <p style={{ margin: 0, fontSize: "12px", color: "var(--text-muted)" }}>
               Remove out-of-stock tag &amp; restore storefront visibility
@@ -373,10 +386,33 @@ export default function AutomationRules() {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
           {/* Left Column: Dynamic Restock Delay & Auto-Fill */}
           <div>
-            <div className="table-card" style={{ padding: "24px" }}>
-              <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#0284c7" }}>
-                Dynamic Restock Delay &amp; Scheduled Auto-Unhide
-              </h2>
+            {/* Dynamic Restock Delay Card */}
+            <div className="table-card" style={{ padding: "24px", opacity: canRestockDelay ? 1 : 0.75 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                <h2 style={{ fontSize: "18px", margin: 0, color: "#0284c7" }}>
+                  Dynamic Restock Delay &amp; Scheduled Auto-Unhide
+                </h2>
+                {!canRestockDelay && (
+                  <Link
+                    to="/app/plan"
+                    style={{
+                      background: "#fef3c7",
+                      color: "#92400e",
+                      border: "1px solid #fcd34d",
+                      padding: "4px 10px",
+                      borderRadius: "12px",
+                      fontSize: "11px",
+                      fontWeight: "700",
+                      textDecoration: "none",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                    }}
+                  >
+                    Growth Feature
+                  </Link>
+                )}
+              </div>
               <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "16px" }}>
                 Schedule an automated delay (Minutes, Hours, Days, Months) after restock before unhiding the product:
               </p>
@@ -384,22 +420,26 @@ export default function AutomationRules() {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: "12px" }}>
                 <div className="form-group">
                   <label className="form-label" htmlFor="field-restockDelayValue">Delay Duration</label>
-                  <input id="field-restockDelayValue"
+                  <input
+                    id="field-restockDelayValue"
                     type="number"
                     name="restockDelayValue"
                     defaultValue={settings.restockDelayValue || 0}
                     className="form-input"
                     min="0"
+                    disabled={!canRestockDelay}
                   />
                 </div>
 
                 <div className="form-group">
                   <label className="form-label" htmlFor="field-restockDelayUnit">Time Unit</label>
-                  <select id="field-restockDelayUnit"
+                  <select
+                    id="field-restockDelayUnit"
                     name="restockDelayUnit"
                     className="form-input"
                     value={restockDelayUnit}
                     onChange={(e) => setRestockDelayUnit(e.target.value)}
+                    disabled={!canRestockDelay}
                     style={{ background: "#ffffff", fontWeight: "600" }}
                   >
                     <option value="IMMEDIATE">Immediate (No Delay)</option>
@@ -411,18 +451,51 @@ export default function AutomationRules() {
                 </div>
               </div>
 
-              <div style={{ background: "#f0f9ff", padding: "14px", borderRadius: "8px", border: "1px solid #bae6fd", marginTop: "14px" }}>
-                <span style={{ fontSize: "12px", color: "#0369a1" }}>
-                  <strong>Scheduled Auto-Unhide Preview:</strong> When inventory is restocked, the system waits <strong>{settings.restockDelayValue || 0} {restockDelayUnit}</strong> before automatically setting status to <strong>ACTIVE</strong> and removing out-of-stock tags.
-                </span>
-              </div>
+              {canRestockDelay ? (
+                <div style={{ background: "#f0f9ff", padding: "14px", borderRadius: "8px", border: "1px solid #bae6fd", marginTop: "14px" }}>
+                  <span style={{ fontSize: "12px", color: "#0369a1" }}>
+                    <strong>Scheduled Auto-Unhide Preview:</strong> When inventory is restocked, the system waits <strong>{settings.restockDelayValue || 0} {restockDelayUnit}</strong> before automatically setting status to <strong>ACTIVE</strong> and removing out-of-stock tags.
+                  </span>
+                </div>
+              ) : (
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", padding: "12px 14px", borderRadius: "8px", marginTop: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: "12px", color: "#92400e" }}>
+                    Restock delay timers are unavailable on your current plan.
+                  </span>
+                  <Link to="/app/plan" style={{ fontSize: "12px", fontWeight: "700", color: "#b45309", textDecoration: "none" }}>
+                    Upgrade to Growth →
+                  </Link>
+                </div>
+              )}
             </div>
 
             {/* Auto-Fill Restock Quantity Card */}
-            <div className="table-card" style={{ padding: "24px" }}>
-              <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#4f46e5" }}>
-                Restock Auto-Fill Quantity
-              </h2>
+            <div className="table-card" style={{ padding: "24px", opacity: canAutoFill ? 1 : 0.75 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                <h2 style={{ fontSize: "18px", margin: 0, color: "#4f46e5" }}>
+                  Restock Auto-Fill Quantity
+                </h2>
+                {!canAutoFill && (
+                  <Link
+                    to="/app/plan"
+                    style={{
+                      background: "#fef3c7",
+                      color: "#92400e",
+                      border: "1px solid #fcd34d",
+                      padding: "4px 10px",
+                      borderRadius: "12px",
+                      fontSize: "11px",
+                      fontWeight: "700",
+                      textDecoration: "none",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                    }}
+                  >
+                    Growth Feature
+                  </Link>
+                )}
+              </div>
 
               <div className="form-switch">
                 <div>
@@ -436,24 +509,38 @@ export default function AutomationRules() {
                   name="enableAutoFill"
                   checked={autoFillEnabled}
                   onChange={(e) => setAutoFillEnabled(e.target.checked)}
+                  disabled={!canAutoFill}
                   style={{ width: "20px", height: "20px" }}
                 />
               </div>
 
-              {autoFillEnabled && (
+              {canAutoFill && autoFillEnabled && (
                 <div className="form-group" style={{ marginTop: "16px" }}>
                   <label className="form-label" htmlFor="field-autoFillQuantity">Auto-Fill Inventory Quantity (Units)</label>
-                  <input id="field-autoFillQuantity"
+                  <input
+                    id="field-autoFillQuantity"
                     type="number"
                     name="autoFillQuantity"
                     defaultValue={settings.autoFillQuantity || 10}
                     className="form-input"
                     min="1"
                     placeholder="e.g. 10, 50, 100"
+                    disabled={!canAutoFill}
                   />
                   <span style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px", display: "block" }}>
                     When triggered, automatically updates variant stock level to this target amount.
                   </span>
+                </div>
+              )}
+
+              {!canAutoFill && (
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", padding: "12px 14px", borderRadius: "8px", marginTop: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: "12px", color: "#92400e" }}>
+                    Inventory auto-fill is unavailable on your current plan.
+                  </span>
+                  <Link to="/app/plan" style={{ fontSize: "12px", fontWeight: "700", color: "#b45309", textDecoration: "none" }}>
+                    Upgrade to Growth →
+                  </Link>
                 </div>
               )}
             </div>
@@ -469,7 +556,8 @@ export default function AutomationRules() {
 
               <div className="form-group">
                 <label className="form-label" htmlFor="field-variantStrategy">Variant Stockout Condition</label>
-                <select id="field-variantStrategy"
+                <select
+                  id="field-variantStrategy"
                   name="variantStrategy"
                   className="form-input"
                   value={selectedVariantStrat}
@@ -509,10 +597,41 @@ export default function AutomationRules() {
             </div>
 
             {/* 2. Storefront Visibility Mode & Tags Card */}
-            <div className="table-card" style={{ padding: "24px" }}>
-              <h2 style={{ fontSize: "18px", margin: "0 0 16px 0", color: "#059669" }}>
-                2. Storefront Visibility Mode &amp; Tags
-              </h2>
+            <div className="table-card" style={{ padding: "24px", opacity: canAutoHide ? 1 : 0.75 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                <h2 style={{ fontSize: "18px", margin: 0, color: "#059669" }}>
+                  2. Storefront Visibility Mode &amp; Tags
+                </h2>
+                {!canAutoHide && (
+                  <Link
+                    to="/app/plan"
+                    style={{
+                      background: "#fef3c7",
+                      color: "#92400e",
+                      border: "1px solid #fcd34d",
+                      padding: "4px 10px",
+                      borderRadius: "12px",
+                      fontSize: "11px",
+                      fontWeight: "700",
+                      textDecoration: "none",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "4px",
+                    }}
+                  >
+                    Growth Feature
+                  </Link>
+                )}
+              </div>
+
+              <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd", padding: "12px 14px", borderRadius: "8px", marginBottom: "16px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "#0369a1", fontWeight: "700", fontSize: "12px" }}>
+                  <span>⚡ 1-Click Setup:</span>
+                </div>
+                <span style={{ fontSize: "12px", color: "#0e7490", display: "block", marginTop: "2px" }}>
+                  Turn ON <strong>Stock Control Embed</strong> in your Shopify Theme Editor once. All hiding &amp; storefront visibility rules are managed 100% directly from this App Dashboard!
+                </span>
+              </div>
 
               <div className="form-switch" style={{ marginBottom: "16px", background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <div>
@@ -524,27 +643,34 @@ export default function AutomationRules() {
                 <input
                   type="checkbox"
                   name="enableAutoHide"
-                  checked={autoHideEnabled}
+                  checked={canAutoHide && autoHideEnabled}
+                  disabled={!canAutoHide}
                   onChange={(e) => {
                     setAutoHideEnabled(e.target.checked);
                     if (!e.target.checked) {
                       setSelectedVisibility("TAG_ONLY");
+                    } else if (selectedVisibility === "TAG_ONLY") {
+                      setSelectedVisibility("ACTIVE_HIDDEN");
                     }
                   }}
-                  style={{ width: "20px", height: "20px", cursor: "pointer" }}
+                  style={{ width: "20px", height: "20px", cursor: canAutoHide ? "pointer" : "not-allowed" }}
                 />
               </div>
 
-              <div className="form-group" style={{ opacity: autoHideEnabled ? 1 : 0.6 }}>
+              <div className="form-group" style={{ opacity: canAutoHide ? 1 : 0.6 }}>
                 <label className="form-label" htmlFor="field-visibilityMode">Visibility Mode Action</label>
-                <input type="hidden" name="visibilityMode" value={selectedVisibility} />
-                <select id="field-visibilityMode"
+                <input type="hidden" name="visibilityMode" value={canAutoHide ? selectedVisibility : "TAG_ONLY"} />
+                <select
+                  id="field-visibilityMode"
                   className="form-input"
-                  value={selectedVisibility}
-                  disabled={!autoHideEnabled}
+                  value={canAutoHide ? selectedVisibility : "TAG_ONLY"}
+                  disabled={!canAutoHide}
                   onChange={(e) => {
-                    setSelectedVisibility(e.target.value);
-                    if (e.target.value !== "TAG_ONLY" && !autoHideEnabled) {
+                    const newMode = e.target.value;
+                    setSelectedVisibility(newMode);
+                    if (newMode === "TAG_ONLY") {
+                      setAutoHideEnabled(false);
+                    } else {
                       setAutoHideEnabled(true);
                     }
                   }}
@@ -557,6 +683,17 @@ export default function AutomationRules() {
                 </select>
               </div>
 
+              {!canAutoHide && (
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", padding: "12px 14px", borderRadius: "8px", marginTop: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: "12px", color: "#92400e" }}>
+                    Auto-hiding products is unavailable on your current plan. Mode is pinned to <strong>Tag Only</strong>.
+                  </span>
+                  <Link to="/app/plan" style={{ fontSize: "12px", fontWeight: "700", color: "#b45309", textDecoration: "none" }}>
+                    Upgrade to Growth →
+                  </Link>
+                </div>
+              )}
+
               {/* Dynamic Visibility Preview Badge */}
               <div style={{
                 background: (selectedVisibility === "ACTIVE_HIDDEN" || selectedVisibility === "UNLISTED") ? "#eff6ff" : selectedVisibility === "DRAFT" ? "#fef2f2" : "#f8fafc",
@@ -568,10 +705,10 @@ export default function AutomationRules() {
                 color: "#1e293b"
               }}>
                 {(selectedVisibility === "ACTIVE_HIDDEN" || selectedVisibility === "UNLISTED") && (
-                  <span><strong>Hide from Catalog &amp; Search (Recommended):</strong> Hides product from collection pages and site search, but keeps the product page URL working so customers can request back-in-stock notifications.</span>
+                  <span><strong>Hide from Catalog &amp; Search (Recommended):</strong> Sets <code>seo.hidden = 1</code> to remove product from search index &amp; hides sold-out cards from theme collection grids via Theme App Embed while preserving direct URLs for notify-me alerts.</span>
                 )}
                 {selectedVisibility === "DRAFT" && (
-                  <span><strong>Draft Mode:</strong> Product status is changed to Draft (completely hides product from storefront, search, and direct links).</span>
+                  <span><strong>Set Status to Draft (100% Total Hide):</strong> Sets product status to <strong>Draft</strong> in Shopify Admin. Completely removes product from storefront collections, site search, catalog grids, and direct URLs.</span>
                 )}
                 {selectedVisibility === "TAG_ONLY" && (
                   <span><strong>Tag Only Mode:</strong> Product stays visible on your store. The app only applies the out-of-stock tag so your theme can show a sold-out badge.</span>
@@ -594,6 +731,7 @@ export default function AutomationRules() {
                   type="checkbox"
                   name="enableAutoTag"
                   checked={taggingEnabled}
+                  disabled={!canAutoTag}
                   onChange={(e) => setTaggingEnabled(e.target.checked)}
                   style={{ width: "20px", height: "20px", cursor: "pointer" }}
                 />
@@ -602,7 +740,8 @@ export default function AutomationRules() {
               {taggingEnabled && (
                 <div className="form-group" style={{ marginTop: "12px" }}>
                   <label className="form-label" htmlFor="field-outOfStockTag">Out-of-Stock Tag Name</label>
-                  <input id="field-outOfStockTag"
+                  <input
+                    id="field-outOfStockTag"
                     type="text"
                     name="outOfStockTag"
                     defaultValue={settings.outOfStockTag}
