@@ -128,7 +128,7 @@ export const action = async ({ request }) => {
       process.env.SHOPIFY_APP_HANDLE ||
       "stockshield"
     ).trim();
-    const returnUrl = `https://${session.shop}/admin/apps/${appIdentifier}/app?charge_approved=true&plan=${plan}`;
+    const returnUrl = `https://${session.shop}/admin/apps/${appIdentifier}/app/settings?charge_approved=true&plan=${plan}`;
 
     // Test charges skip payment-method collection entirely, so the merchant never gets
     // the card step. Real charges need test: false AND a store that can actually be
@@ -308,6 +308,12 @@ export default function Settings() {
   }, [fetcher.data, shopify]);
 
   useEffect(() => {
+    if (loaderSub?.plan) {
+      setSelectedPlan(loaderSub.plan);
+    }
+  }, [loaderSub?.plan]);
+
+  useEffect(() => {
     if (fetcher.data?.type === "billing_error") {
       // The charge was never created, so keep showing whatever plan is actually active.
       setSelectedPlan(currentPlan);
@@ -316,6 +322,8 @@ export default function Settings() {
   }, [fetcher.data, currentPlan, shopify]);
 
   const isSubmitting = fetcher.state === "submitting";
+  const isChangingPlan = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "change_plan";
+  const targetPlan = isChangingPlan ? fetcher.formData?.get("plan") : null;
 
   const handlePlanSelect = (planName) => {
     // No optimistic switch here: a paid plan is only really selected once Shopify has
@@ -587,9 +595,14 @@ export default function Settings() {
               <button
                 onClick={() => handlePlanSelect("FREE")}
                 className="btn-secondary"
-                style={{ width: "100%", padding: "8px" }}
+                disabled={isChangingPlan}
+                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
               >
-                {selectedPlan === "FREE" ? "Current Active Plan" : "Select Free"}
+                {isChangingPlan && targetPlan === "FREE"
+                  ? "Switching Plan..."
+                  : selectedPlan === "FREE"
+                  ? "Current Active Plan"
+                  : "Select Free"}
               </button>
             </div>
 
@@ -618,9 +631,14 @@ export default function Settings() {
               <button
                 onClick={() => handlePlanSelect("GROWTH")}
                 className="btn-primary"
-                style={{ width: "100%", padding: "8px" }}
+                disabled={isChangingPlan}
+                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
               >
-                {selectedPlan === "GROWTH" ? "Current Active Plan" : "Upgrade to Growth"}
+                {isChangingPlan && targetPlan === "GROWTH"
+                  ? "Processing..."
+                  : selectedPlan === "GROWTH"
+                  ? "Current Active Plan"
+                  : "Upgrade to Growth"}
               </button>
             </div>
 
@@ -649,9 +667,14 @@ export default function Settings() {
               <button
                 onClick={() => handlePlanSelect("PRO")}
                 className="btn-secondary"
-                style={{ width: "100%", padding: "8px" }}
+                disabled={isChangingPlan}
+                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
               >
-                {selectedPlan === "PRO" ? "Current Active Plan" : "Upgrade to Pro"}
+                {isChangingPlan && targetPlan === "PRO"
+                  ? "Processing..."
+                  : selectedPlan === "PRO"
+                  ? "Current Active Plan"
+                  : "Upgrade to Pro"}
               </button>
             </div>
 
@@ -680,9 +703,14 @@ export default function Settings() {
               <button
                 onClick={() => handlePlanSelect("ENTERPRISE")}
                 className="btn-secondary"
-                style={{ width: "100%", padding: "8px" }}
+                disabled={isChangingPlan}
+                style={{ width: "100%", padding: "8px", opacity: isChangingPlan ? 0.7 : 1 }}
               >
-                {selectedPlan === "ENTERPRISE" ? "Current Active Plan" : "Upgrade to Enterprise"}
+                {isChangingPlan && targetPlan === "ENTERPRISE"
+                  ? "Processing..."
+                  : selectedPlan === "ENTERPRISE"
+                  ? "Current Active Plan"
+                  : "Upgrade to Enterprise"}
               </button>
             </div>
           </div>
