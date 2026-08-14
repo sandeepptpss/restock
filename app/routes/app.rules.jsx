@@ -280,101 +280,223 @@ export default function AutomationRules() {
         {/* Step-by-Step Flow Nodes */}
         <div
           style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-            gap: "16px",
-            alignItems: "center",
+            display: "flex",
+            alignItems: "stretch",
+            justifyContent: "space-between",
+            gap: "8px",
+            width: "100%",
+            overflowX: "auto",
+            padding: "4px 2px",
           }}
         >
           {/* STEP 1: RESTOCK DETECTED */}
           <div
             style={{
+              flex: "1 1 0%",
+              minWidth: "175px",
               background: "#ffffff",
-              border: "2px solid #6366f1",
-              borderRadius: "14px",
-              padding: "16px",
-              boxShadow: "0 4px 6px -1px rgba(99, 102, 241, 0.1)",
+              border: "1px solid #c7d2fe",
+              borderLeft: "4px solid #4f46e5",
+              borderRadius: "12px",
+              padding: "16px 14px",
+              boxShadow: "0 4px 12px rgba(99, 102, 241, 0.06)",
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
             }}
           >
-            <div style={{ fontSize: "11px", fontWeight: "800", color: "#6366f1", textTransform: "uppercase", letterSpacing: "1px" }}>
-              STEP 1 • RESTOCK EVENT
+            <div>
+              <div style={{ fontSize: "10px", fontWeight: "800", color: "#4f46e5", textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: "4px" }}>
+                STEP 1 • RESTOCK EVENT
+              </div>
+              <strong style={{ display: "block", fontSize: "14px", color: "#0f172a", lineHeight: "1.3" }}>
+                Restock Triggered
+              </strong>
             </div>
-            <strong style={{ display: "block", fontSize: "15px", margin: "6px 0 4px 0", color: "#0f172a" }}>
-              Restock Triggered
-            </strong>
-            <p style={{ margin: 0, fontSize: "12px", color: "var(--text-muted)" }}>
+            <p style={{ margin: "8px 0 0 0", fontSize: "11px", color: "var(--text-muted)", lineHeight: "1.4" }}>
               Stock quantity updated or auto-filled
             </p>
           </div>
 
-          <div style={{ textAlign: "center", color: "#94a3b8", fontWeight: "bold", fontSize: "20px" }}>&rarr;</div>
+          {/* Arrow Connector 1 */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              alignSelf: "center",
+              padding: "0 2px",
+            }}
+          >
+            <div
+              style={{
+                width: "28px",
+                height: "28px",
+                borderRadius: "50%",
+                background: "#f1f5f9",
+                border: "1px solid #cbd5e1",
+                color: "#64748b",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 12h14M12 5l7 7-7 7"/>
+              </svg>
+            </div>
+          </div>
 
           {/* STEP 2: AUTO-FILL QUANTITY */}
           <div
             style={{
+              flex: "1 1 0%",
+              minWidth: "175px",
               background: "#ffffff",
-              border: `2px solid ${canAutoFill ? "#0284c7" : "#cbd5e1"}`,
-              borderRadius: "14px",
-              padding: "16px",
-              opacity: canAutoFill ? 1 : 0.6,
-              boxShadow: canAutoFill ? "0 4px 6px -1px rgba(2, 132, 199, 0.1)" : "none",
+              border: `1px solid ${canAutoFill ? "#bae6fd" : "#e2e8f0"}`,
+              borderLeft: `4px solid ${canAutoFill ? "#0284c7" : "#94a3b8"}`,
+              borderRadius: "12px",
+              padding: "16px 14px",
+              opacity: canAutoFill ? 1 : 0.7,
+              boxShadow: canAutoFill ? "0 4px 12px rgba(2, 132, 199, 0.06)" : "none",
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
             }}
           >
-            <div style={{ fontSize: "11px", fontWeight: "800", color: canAutoFill ? "#0284c7" : "#64748b", textTransform: "uppercase", letterSpacing: "1px" }}>
-              STEP 2 • AUTO-FILL {!canAutoFill && "[Locked]"}
+            <div>
+              <div style={{ fontSize: "10px", fontWeight: "800", color: canAutoFill ? "#0284c7" : "#64748b", textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: "4px" }}>
+                STEP 2 • AUTO-FILL {!canAutoFill && "[Locked]"}
+              </div>
+              <strong style={{ display: "block", fontSize: "14px", color: "#0f172a", lineHeight: "1.3" }}>
+                {canAutoFill && autoFillEnabled ? `Auto-Fill +${settings.autoFillQuantity || 10} Units` : canAutoFill ? "Manual Quantity" : "Requires Growth Plan"}
+              </strong>
             </div>
-            <strong style={{ display: "block", fontSize: "14px", margin: "6px 0 4px 0", color: "#0f172a" }}>
-              {canAutoFill && autoFillEnabled ? `Auto-Fill +${settings.autoFillQuantity || 10} Units` : canAutoFill ? "Manual Quantity" : "Requires Growth Plan"}
-            </strong>
-            <p style={{ margin: 0, fontSize: "12px", color: "var(--text-muted)" }}>
+            <p style={{ margin: "8px 0 0 0", fontSize: "11px", color: "var(--text-muted)", lineHeight: "1.4" }}>
               Inventory level initialized
             </p>
           </div>
 
-          <div style={{ textAlign: "center", color: "#94a3b8", fontWeight: "bold", fontSize: "20px" }}>&rarr;</div>
+          {/* Arrow Connector 2 */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              alignSelf: "center",
+              padding: "0 2px",
+            }}
+          >
+            <div
+              style={{
+                width: "28px",
+                height: "28px",
+                borderRadius: "50%",
+                background: "#f1f5f9",
+                border: "1px solid #cbd5e1",
+                color: "#64748b",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 12h14M12 5l7 7-7 7"/>
+              </svg>
+            </div>
+          </div>
 
           {/* STEP 3: SCHEDULED TIMER */}
           <div
             style={{
+              flex: "1 1 0%",
+              minWidth: "175px",
               background: "#ffffff",
-              border: `2px solid ${canRestockDelay ? "#f59e0b" : "#cbd5e1"}`,
-              borderRadius: "14px",
-              padding: "16px",
-              opacity: canRestockDelay ? 1 : 0.6,
-              boxShadow: canRestockDelay ? "0 4px 6px -1px rgba(245, 158, 11, 0.1)" : "none",
+              border: `1px solid ${canRestockDelay ? "#fde68a" : "#e2e8f0"}`,
+              borderLeft: `4px solid ${canRestockDelay ? "#d97706" : "#94a3b8"}`,
+              borderRadius: "12px",
+              padding: "16px 14px",
+              opacity: canRestockDelay ? 1 : 0.7,
+              boxShadow: canRestockDelay ? "0 4px 12px rgba(245, 158, 11, 0.06)" : "none",
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
             }}
           >
-            <div style={{ fontSize: "11px", fontWeight: "800", color: canRestockDelay ? "#d97706" : "#64748b", textTransform: "uppercase", letterSpacing: "1px" }}>
-              STEP 3 • UNHIDE TIMER {!canRestockDelay && "[Locked]"}
+            <div>
+              <div style={{ fontSize: "10px", fontWeight: "800", color: canRestockDelay ? "#d97706" : "#64748b", textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: "4px" }}>
+                STEP 3 • UNHIDE TIMER {!canRestockDelay && "[Locked]"}
+              </div>
+              <strong style={{ display: "block", fontSize: "14px", color: "#0f172a", lineHeight: "1.3" }}>
+                {canRestockDelay ? (restockDelayUnit === "IMMEDIATE" ? "Immediate Unhide" : `Delay ${settings.restockDelayValue || 0} ${restockDelayUnit}`) : "Immediate (Free Plan)"}
+              </strong>
             </div>
-            <strong style={{ display: "block", fontSize: "14px", margin: "6px 0 4px 0", color: "#0f172a" }}>
-              {canRestockDelay ? (restockDelayUnit === "IMMEDIATE" ? "Immediate Unhide" : `Delay ${settings.restockDelayValue || 0} ${restockDelayUnit}`) : "Immediate (Free Plan)"}
-            </strong>
-            <p style={{ margin: 0, fontSize: "12px", color: "var(--text-muted)" }}>
+            <p style={{ margin: "8px 0 0 0", fontSize: "11px", color: "var(--text-muted)", lineHeight: "1.4" }}>
               Buffer time before making item visible
             </p>
           </div>
 
-          <div style={{ textAlign: "center", color: "#94a3b8", fontWeight: "bold", fontSize: "20px" }}>&rarr;</div>
+          {/* Arrow Connector 3 */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              alignSelf: "center",
+              padding: "0 2px",
+            }}
+          >
+            <div
+              style={{
+                width: "28px",
+                height: "28px",
+                borderRadius: "50%",
+                background: "#f1f5f9",
+                border: "1px solid #cbd5e1",
+                color: "#64748b",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 12h14M12 5l7 7-7 7"/>
+              </svg>
+            </div>
+          </div>
 
           {/* STEP 4: AUTO-UNHIDE PRODUCT */}
           <div
             style={{
+              flex: "1 1 0%",
+              minWidth: "175px",
               background: "#ffffff",
-              border: `2px solid ${canAutoHide ? "#10b981" : "#cbd5e1"}`,
-              borderRadius: "14px",
-              padding: "16px",
-              opacity: canAutoHide ? 1 : 0.6,
-              boxShadow: canAutoHide ? "0 4px 6px -1px rgba(16, 185, 129, 0.1)" : "none",
+              border: `1px solid ${canAutoHide ? "#a7f3d0" : "#e2e8f0"}`,
+              borderLeft: `4px solid ${canAutoHide ? "#059669" : "#94a3b8"}`,
+              borderRadius: "12px",
+              padding: "16px 14px",
+              opacity: canAutoHide ? 1 : 0.7,
+              boxShadow: canAutoHide ? "0 4px 12px rgba(16, 185, 129, 0.06)" : "none",
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
             }}
           >
-            <div style={{ fontSize: "11px", fontWeight: "800", color: canAutoHide ? "#059669" : "#64748b", textTransform: "uppercase", letterSpacing: "1px" }}>
-              STEP 4 • AUTO-UNHIDE {!canAutoHide && "[Locked]"}
+            <div>
+              <div style={{ fontSize: "10px", fontWeight: "800", color: canAutoHide ? "#059669" : "#64748b", textTransform: "uppercase", letterSpacing: "0.8px", marginBottom: "4px" }}>
+                STEP 4 • AUTO-UNHIDE {!canAutoHide && "[Locked]"}
+              </div>
+              <strong style={{ display: "block", fontSize: "14px", color: "#0f172a", lineHeight: "1.3" }}>
+                {canAutoHide ? "Status → ACTIVE" : "Tag Only (Free Plan)"}
+              </strong>
             </div>
-            <strong style={{ display: "block", fontSize: "15px", margin: "6px 0 4px 0", color: "#0f172a" }}>
-              {canAutoHide ? "Status → ACTIVE" : "Tag Only (Free Plan)"}
-            </strong>
-            <p style={{ margin: 0, fontSize: "12px", color: "var(--text-muted)" }}>
+            <p style={{ margin: "8px 0 0 0", fontSize: "11px", color: "var(--text-muted)", lineHeight: "1.4" }}>
               Remove out-of-stock tag &amp; restore storefront visibility
             </p>
           </div>
