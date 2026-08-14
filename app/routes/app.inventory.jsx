@@ -87,25 +87,55 @@ export default function StockRadar() {
   const paginatedItems = filteredItems.slice((validPage - 1) * pageSize, validPage * pageSize);
 
   const exportCSV = () => {
-    const headers = ["Product Title", "Variant", "SKU", "Current Qty", "Daily Velocity", "Days of Inventory", "Suggested Reorder Qty"];
-    const rows = items.map((i) => [
-      `"${i.productTitle}"`,
-      `"${i.variantTitle}"`,
-      `"${i.sku}"`,
-      i.inventoryQuantity,
-      i.dailyVelocity ?? "no data",
-      i.daysOfInventory ?? "no data",
-      i.suggestedReorderQty ?? "no data",
-    ]);
+    const escapeCSV = (val) => {
+      if (val === null || val === undefined) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
 
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
+    const headers = [
+      "Product Title",
+      "Variant Title",
+      "SKU",
+      "Current Qty",
+      "Daily Velocity",
+      "Days of Inventory",
+      "Reorder Point (ROP)",
+      "Suggested Reorder Qty",
+    ];
+
+    const leadTime = settings?.leadTimeDays || 14;
+
+    const rows = items.map((i) => {
+      const hasVelocity = i.dailyVelocity != null;
+      const rop = hasVelocity
+        ? Math.ceil(i.dailyVelocity * leadTime + (i.threshold || 0))
+        : "N/A";
+
+      return [
+        escapeCSV(i.productTitle || ""),
+        escapeCSV(i.variantTitle !== "Default Title" ? (i.variantTitle || "") : ""),
+        escapeCSV(i.sku || "N/A"),
+        escapeCSV(i.inventoryQuantity ?? 0),
+        escapeCSV(hasVelocity ? i.dailyVelocity : "N/A"),
+        escapeCSV(i.daysOfInventory ?? "N/A"),
+        escapeCSV(rop),
+        escapeCSV(i.suggestedReorderQty ?? "N/A"),
+      ].join(",");
+    });
+
+    const csvString = [headers.map(escapeCSV).join(","), ...rows].join("\r\n");
+    const blob = new Blob(["\uFEFF" + csvString], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `stockout_forecast_report_${new Date().toISOString().slice(0,10)}.csv`);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `stockout_forecast_report_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
     shopify?.toast?.show?.("Exported Reorder Forecast CSV");
   };
 
