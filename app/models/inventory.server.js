@@ -15,6 +15,13 @@ import {
   plainAll,
 } from "./schemas.server";
 import { unauthenticated } from "../shopify.server";
+import {
+  applyPlanToSettings,
+  getPlan,
+  normalizePlan,
+  PLAN_ORDER,
+  PLAN_PRICES,
+} from "../utils/planLimits";
 
 // Safety cap on how much of a catalogue one scan walks through, so a very large
 // store cannot turn a single request into thousands of API calls.
@@ -118,6 +125,27 @@ export async function getInventorySettings(shop) {
     console.warn("Error loading inventorySettings from DB, falling back to default:", err.message);
     return DEFAULT_SETTINGS(shop);
   }
+}
+
+/**
+ * The settings the automation engine may act on for a shop: the merchant's
+ * stored preferences, clamped to what their plan includes.
+ *
+ * Every automation path resolves its settings through here — the catalogue scan,
+ * the inventory webhook, the scheduled restock runner — so a capability the plan
+ * does not include cannot be reached from any direction, including from
+ * preferences left behind by a plan the shop no longer pays for.
+ *
+ * The UI keeps reading getInventorySettings() so a merchant still sees the
+ * choices they made; those choices are simply not honoured until their plan
+ * covers them again.
+ */
+export async function getEffectiveSettings(shop) {
+  const [settings, subscription] = await Promise.all([
+    getInventorySettings(shop),
+    getShopSubscription(shop),
+  ]);
+  return applyPlanToSettings(settings, subscription?.plan);
 }
 
 /**
@@ -762,7 +790,9 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
     console.warn("Locations query error (skipped gracefully):", err.message);
   }
 
-  const settings = await getInventorySettings(shop);
+  // Plan-clamped: this is the view the automation scan acts on, and the UI
+  // loaders that read it show what the shop's plan actually does.
+  const settings = await getEffectiveSettings(shop);
   const customThresholds = await getProductThresholds(shop);
   const velocityMap = await getObservedSalesVelocity(shop);
 
@@ -981,7 +1011,43 @@ export async function runStockoutAutomationScan(admin, shop) {
     productGroupMap.get(item.productId).push(item);
   }
 
-  for (const [productId, productItems] of productGroupMap.entries()) {
+  // PLAN ITEM ALLOWANCE — the "Catalog Active Items Limit" row of the plan
+  // matrix, enforced rather than merely advertised. Whole products are taken in
+  // catalogue order until the allowance is used up, so a product is never left
+  // half-automated (some variants hidden, others not). The remainder is reported
+  // once per scan; the merchant's own items are never touched or altered.
+  const itemLimit = settings.planItemLimit ?? Infinity;
+  const automatedGroups = [];
+  let automatedItemCount = 0;
+  let skippedItemCount = 0;
+  let skippedProductCount = 0;
+
+  for (const group of productGroupMap.entries()) {
+    if (automatedItemCount + group[1].length <= itemLimit) {
+      automatedGroups.push(group);
+      automatedItemCount += group[1].length;
+    } else {
+      skippedItemCount += group[1].length;
+      skippedProductCount++;
+    }
+  }
+
+  if (skippedItemCount > 0) {
+    console.warn(
+      `[Scan] ${shop} is on ${settings.plan} (${itemLimit} items): automating ${automatedItemCount} item(s), ${skippedItemCount} beyond the allowance were skipped`
+    );
+    logsToCreate.push({
+      shop,
+      eventType: "PLAN_LIMIT",
+      productTitle: "Plan item allowance reached",
+      quantity: skippedItemCount,
+      actionTaken: `${automatedItemCount} of ${items.length} items automated — the ${settings.plan} plan covers ${itemLimit} items`,
+      status: "WARNING",
+      details: `${skippedItemCount} item(s) across ${skippedProductCount} product(s) were left untouched. Upgrade to automate the rest of the catalogue.`,
+    });
+  }
+
+  for (const [productId, productItems] of automatedGroups) {
     const totalProdInventory = productItems.reduce((sum, i) => sum + i.inventoryQuantity, 0);
     const firstItem = productItems[0];
 
@@ -1193,6 +1259,18 @@ export async function runStockoutAutomationScan(admin, shop) {
     // so the product-level hide can be reversed. The obsolete per-variant auto-fill
     // jobs were already cancelled above, one stocked variant at a time.
     else if (stockedVariants.length > 0 && !variantsTruncated) {
+      const isArchived = firstItem.productStatus === "ARCHIVED";
+      const isDraftNotAppHidden =
+        firstItem.productStatus === "DRAFT" &&
+        (settings.visibilityMode !== "DRAFT" || !(firstItem.productTags || []).includes(settings.outOfStockTag));
+
+      if (isArchived || isDraftNotAppHidden) {
+        console.log(
+          `[Scan] ${firstItem.productTitle} is ${firstItem.productStatus} (manually set by merchant) — skipping auto-unhide/republish`
+        );
+        continue;
+      }
+
       // Same hold-down as the webhook: with a Restock Delay configured, the untag
       // and the visibility restore belong to a scheduled UNHIDE job, not to this
       // pass. Without one they run inline, exactly as before.
@@ -1200,8 +1278,9 @@ export async function runStockoutAutomationScan(admin, shop) {
       const carriesOutOfStockTagNow =
         settings.enableAutoTag !== false && (firstItem.productTags || []).includes(settings.outOfStockTag);
       const hiddenByApp = needsVisibilityRestore(
-        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden },
-        settings.visibilityMode
+        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden, tags: firstItem.productTags },
+        settings.visibilityMode,
+        settings
       );
 
       // The variant that put the product back in stock, for the audit trail.
@@ -1290,8 +1369,9 @@ export async function runStockoutAutomationScan(admin, shop) {
       // only when the seo.hidden metafield is still set; the channel mode has no
       // status to inspect, so it is always re-published.
       const needsRestore = needsVisibilityRestore(
-        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden },
-        settings.visibilityMode
+        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden, tags: firstItem.productTags },
+        settings.visibilityMode,
+        settings
       );
 
       if (settings.enableAutoPublish && needsRestore) {
@@ -1299,6 +1379,8 @@ export async function runStockoutAutomationScan(admin, shop) {
           productId,
           visibilityMode: settings.visibilityMode,
           shop,
+          productStatus: firstItem.productStatus,
+          productTags: firstItem.productTags,
         });
         if (restored.errors.length > 0) {
           console.error("Auto publish errors:", restored.errors);
@@ -1462,6 +1544,9 @@ export async function runStockoutAutomationScan(admin, shop) {
 
   return {
     scanned: items.length,
+    automated: automatedItemCount,
+    skippedOverPlanLimit: skippedItemCount,
+    plan: settings.plan,
     taggedCount,
     hiddenCount,
     publishedCount,
@@ -1477,8 +1562,18 @@ export async function getAutomationLogs(shop, limit = 50) {
   if (!isDbConfigured()) return [];
   try {
     await tryConnectDB();
+
+    // "Activity Log Audit Retention" from the plan matrix: 7 days on Starter, 30
+    // on Growth, 90 on Pro, unlimited on Enterprise. Applied to the query rather
+    // than to the rendering, so an older entry is never sent to the browser.
+    const { logRetentionDays } = getPlan((await getShopSubscription(shop))?.plan);
+    const query = { shop };
+    if (logRetentionDays != null) {
+      query.createdAt = { $gte: new Date(Date.now() - logRetentionDays * 86400000) };
+    }
+
     return plainAll(
-      await AutomationLog.find({ shop }).sort({ createdAt: -1 }).limit(limit).lean()
+      await AutomationLog.find(query).sort({ createdAt: -1 }).limit(limit).lean()
     );
   } catch (err) {
     console.warn("Error fetching automationLogs:", err.message);
@@ -1883,11 +1978,16 @@ export function evaluateStockoutCondition(quantities, strategy) {
  */
 function readVisibilityState(product) {
   if (product == null || typeof product === "string") {
-    return { status: product || "", seoHidden: undefined };
+    return { status: product || "", seoHidden: undefined, tags: [] };
   }
   return {
     status: product.status || product.productStatus || "",
     seoHidden: product.seoHidden !== undefined ? product.seoHidden : product.productSeoHidden,
+    tags: Array.isArray(product.tags)
+      ? product.tags
+      : Array.isArray(product.productTags)
+      ? product.productTags
+      : [],
   };
 }
 
@@ -1911,19 +2011,28 @@ function isSeoHiddenValue(value) {
  * Takes the product (`{ status, seoHidden }`); a bare status string still works
  * for the status-based modes.
  */
-export function needsVisibilityRestore(product, visibilityMode) {
+export function needsVisibilityRestore(product, visibilityMode, settings = {}) {
   const mode = visibilityMode || "DRAFT";
-  const { status, seoHidden } = readVisibilityState(product);
+  const { status, seoHidden, tags } = readVisibilityState(product);
+  const outOfStockTag = settings?.outOfStockTag || "out-of-stock";
 
-  // If a product is currently drafted or hidden via seo.hidden = 1, it needs visibility restore to be visible on storefront
-  if (status === "DRAFT" || isSeoHiddenValue(seoHidden)) return true;
-  if (mode === "UNPUBLISH_CHANNEL") return true;
+  // ARCHIVED products were archived by merchant and must never be auto-restored
+  if (status === "ARCHIVED") return false;
+
+  // DRAFT products: only restore if mode is DRAFT AND product carries the app's out-of-stock tag
+  if (status === "DRAFT") {
+    if (mode !== "DRAFT") return false;
+    const hasAppTag = (tags || []).includes(outOfStockTag);
+    return hasAppTag;
+  }
 
   if (mode === "TAG_ONLY") return false;
   if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
     return seoHidden === undefined ? true : isSeoHiddenValue(seoHidden);
   }
-  return status === "DRAFT";
+  if (mode === "UNPUBLISH_CHANNEL") return true;
+
+  return false;
 }
 
 /**
@@ -2194,13 +2303,23 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
  * product — so a TAG_ONLY setup never silently activates a product the merchant
  * drafted themselves.
  */
-export async function restoreProductVisibility(admin, { productId, visibilityMode, shop }) {
+export async function restoreProductVisibility(admin, { productId, visibilityMode, shop, productStatus, productTags }) {
   const mode = visibilityMode || "DRAFT";
   const id = ensureGid(productId, "Product");
   const errors = [];
 
   if (!admin || !id) {
     return { mode, action: "skipped", changed: false, errors: ["Missing admin client or product id"] };
+  }
+
+  // Guard: ARCHIVED products or merchant DRAFT products must not be auto-published to ACTIVE
+  if (productStatus === "ARCHIVED" || (productStatus === "DRAFT" && mode !== "DRAFT")) {
+    return {
+      mode,
+      action: `Skipped restore — product is ${productStatus} (manually set by merchant)`,
+      changed: false,
+      errors: [],
+    };
   }
 
   if (mode === "TAG_ONLY") {
@@ -2434,7 +2553,7 @@ export async function scheduleProductRestock(
   if (!isDbConfigured()) return null;
   await tryConnectDB();
 
-  const settings = await getInventorySettings(shop);
+  const settings = await getEffectiveSettings(shop);
   const delayMs = calculateDelayMs(settings.restockDelayValue, settings.restockDelayUnit);
   // An unhide job never touches inventory — the merchant already restocked.
   const targetQuantity = jobType === "UNHIDE" ? 0 : settings.enableAutoFill ? (settings.autoFillQuantity || 10) : 0;
@@ -2558,7 +2677,18 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
     return null;
   }
 
-  const settings = context.settings || (await getInventorySettings(shop));
+  const settings = context.settings || (await getEffectiveSettings(shop));
+
+  // A job queued while the shop was on a paid plan can still be pending after a
+  // downgrade. Executing it would carry out an automation the plan no longer
+  // includes, so it is retired instead of run.
+  if (record.targetQuantity > 0 && !settings.enableAutoFill) {
+    await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "CANCELLED" } });
+    console.log(
+      `[ScheduledRestock] Job ${restockId} cancelled: auto-fill is not included in the ${settings.plan} plan`
+    );
+    return { skipped: true, reason: "plan-excludes-auto-fill", plan: settings.plan };
+  }
 
   const inventoryItemId = ensureGid(record.inventoryItemId, "InventoryItem");
   const productId = ensureGid(record.productId, "Product");
@@ -2641,6 +2771,32 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
   // still report the pre-fill value.
   const stockState = await fetchProductStockState(adminClient, productId);
   if (stockState && !stockState.variantsTruncated) {
+    const isArchived = stockState.status === "ARCHIVED";
+    const isDraftNotAppHidden =
+      stockState.status === "DRAFT" &&
+      (settings.visibilityMode !== "DRAFT" || !(stockState.tags || []).includes(tagToRemove));
+
+    if (isArchived || isDraftNotAppHidden) {
+      await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "CANCELLED" } });
+
+      await createAutomationLog({
+        shop,
+        eventType: isUnhideJob ? "SCHEDULED_UNHIDE" : "AUTO_FILL_RESTOCK",
+        productId,
+        productTitle: stockState.title || productTitle,
+        variantId,
+        variantTitle,
+        inventoryItemId,
+        sku,
+        quantity: didAutoFill ? record.targetQuantity : 0,
+        actionTaken: `[Scheduled Timer] Auto-unhide skipped — product is ${stockState.status} (manually set by merchant)`,
+        status: "SUCCESS",
+      });
+
+      console.log(`[ScheduledRestock] Job ${restockId}: ${productId} skipped because product status is ${stockState.status}`);
+      return { skipped: true, reason: `product-${stockState.status.toLowerCase()}`, productId, filled: didAutoFill };
+    }
+
     const liveQuantities = (stockState.variants || []).map((v) => {
       const isFilledVariant =
         didAutoFill &&
@@ -2716,12 +2872,22 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
     console.warn(`[ScheduledRestock] Tags remove error:`, err.message);
   }
 
-  // 4. Auto-Unhide Product, reversing whatever the configured Visibility Mode did
-  const restored = await restoreProductVisibility(adminClient, {
-    productId,
-    visibilityMode: settings.visibilityMode,
-    shop,
-  });
+  // 4. Auto-Unhide Product, reversing whatever the configured Visibility Mode did.
+  // Auto-publish is a paid capability, so a plan without it gets the tag removal
+  // above and nothing else.
+  const restored =
+    settings.enableAutoPublish !== false
+      ? await restoreProductVisibility(adminClient, {
+          productId,
+          visibilityMode: settings.visibilityMode,
+          shop,
+        })
+      : {
+          mode: settings.visibilityMode || "TAG_ONLY",
+          action: `Auto-publish not included in the ${settings.plan} plan`,
+          changed: false,
+          errors: [],
+        };
   if (restored.errors.length > 0) {
     warnings.push(`visibility: ${restored.errors.join("; ")}`);
     console.warn(`[ScheduledRestock] Product unhide errors:`, restored.errors);
@@ -2958,6 +3124,159 @@ export async function getShopSubscription(shop) {
 }
 
 export { PLAN_LIMITS, checkPlanLimitStatus } from "../utils/planLimits";
+
+/**
+ * The plan Shopify says this shop is actually paying for.
+ *
+ * The billing return URL carries `?charge_approved=true&plan=…`, which is a
+ * merchant-controlled query string and no evidence of a charge at all — typing
+ * it by hand granted Enterprise for free. The only trustworthy source is
+ * Shopify's own record of active subscriptions, which is what this reads. It is
+ * also what catches a subscription cancelled or declined outside the app, since
+ * no active subscription resolves to FREE.
+ *
+ * Returns null when Shopify could not be reached, which callers must treat as
+ * "unknown" and leave the stored plan alone rather than downgrading a paying
+ * merchant on a transient API error.
+ */
+export async function fetchActivePlanFromShopify(admin) {
+  if (!admin) return null;
+  try {
+    const res = await admin.graphql(
+      `#graphql
+        query activeSubscriptions {
+          currentAppInstallation {
+            activeSubscriptions {
+              name
+              status
+              lineItems {
+                plan {
+                  pricingDetails {
+                    ... on AppRecurringPricing {
+                      price { amount }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `
+    );
+    const json = await res.json();
+    if (json.errors?.length) {
+      console.error("[billing] activeSubscriptions query errors:", json.errors);
+      return null;
+    }
+
+    const active = (json.data?.currentAppInstallation?.activeSubscriptions || []).filter(
+      (sub) => sub.status === "ACTIVE"
+    );
+    if (active.length === 0) return "FREE";
+
+    // Matched on the charged amount rather than the subscription name: the name
+    // is a display string this app happens to set, while the price is what the
+    // merchant is actually billed and what the plan matrix is defined by.
+    let best = "FREE";
+    for (const sub of active) {
+      const amount = Number(sub.lineItems?.[0]?.plan?.pricingDetails?.price?.amount);
+      const matched = PLAN_ORDER.find(
+        (key) => PLAN_PRICES[key] > 0 && Math.abs(PLAN_PRICES[key] - amount) < 0.01
+      );
+      const candidate =
+        matched ||
+        PLAN_ORDER.find((key) => sub.name?.toUpperCase().includes(key)) ||
+        "FREE";
+      if (PLAN_ORDER.indexOf(candidate) > PLAN_ORDER.indexOf(best)) best = candidate;
+    }
+    return best;
+  } catch (err) {
+    console.error("[billing] Could not read active subscriptions:", err.message);
+    return null;
+  }
+}
+
+/**
+ * Cancel every active app subscription for the shop.
+ *
+ * A downgrade to Starter has to reach Shopify: setting the stored plan to FREE
+ * on its own leaves the recurring charge running, so the merchant keeps paying
+ * for a tier the app has already taken away from them.
+ */
+export async function cancelActiveSubscriptions(admin) {
+  if (!admin) return { cancelled: 0, errors: ["No admin client"] };
+
+  const errors = [];
+  let cancelled = 0;
+  try {
+    const res = await admin.graphql(
+      `#graphql
+        query activeSubscriptionIds {
+          currentAppInstallation {
+            activeSubscriptions { id status }
+          }
+        }
+      `
+    );
+    const json = await res.json();
+    const subs = (json.data?.currentAppInstallation?.activeSubscriptions || []).filter(
+      (sub) => sub.status === "ACTIVE"
+    );
+
+    for (const sub of subs) {
+      const cancelRes = await admin.graphql(
+        `#graphql
+          mutation appSubscriptionCancel($id: ID!) {
+            appSubscriptionCancel(id: $id) {
+              appSubscription { id status }
+              userErrors { field message }
+            }
+          }
+        `,
+        { variables: { id: sub.id } }
+      );
+      const cancelJson = await cancelRes.json();
+      const userErrors = collectGraphqlErrors(cancelJson, "appSubscriptionCancel");
+      if (userErrors.length > 0) errors.push(...userErrors);
+      else cancelled++;
+    }
+  } catch (err) {
+    errors.push(err.message);
+  }
+
+  return { cancelled, errors };
+}
+
+/**
+ * Bring the stored plan in line with Shopify's billing record.
+ *
+ * Called wherever a plan is about to be trusted (the Plan page, the billing
+ * return URL), so an approval that never completed, a declined charge or a
+ * cancellation outside the app all converge on the right tier without the
+ * merchant having to do anything.
+ */
+export async function syncSubscriptionFromShopify(admin, shop) {
+  const shopifyPlan = await fetchActivePlanFromShopify(admin);
+  if (!shopifyPlan) return { synced: false, subscription: await getShopSubscription(shop) };
+
+  const stored = await getShopSubscription(shop);
+  if (normalizePlan(stored?.plan) === shopifyPlan) {
+    return { synced: true, changed: false, subscription: stored };
+  }
+
+  const updated = await updateShopSubscription(shop, shopifyPlan);
+  console.log(`[billing] ${shop}: stored plan ${stored?.plan} → ${shopifyPlan} (from Shopify)`);
+  await createAutomationLog({
+    shop,
+    eventType: "BILLING_SYNC",
+    productTitle: `Plan set to ${shopifyPlan}`,
+    variantTitle: "Shopify billing record",
+    actionTaken: `Stored plan '${stored?.plan}' did not match Shopify's active subscription; set to ${shopifyPlan}.`,
+    status: "SUCCESS",
+  }).catch(() => {});
+
+  return { synced: true, changed: true, subscription: updated };
+}
 
 /**
  * Update shop subscription plan

@@ -4,22 +4,40 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { fetchShopifyInventory, getShopSubscription } from "../models/inventory.server";
-import { checkPlanLimitStatus } from "../utils/planLimits";
+import { checkPlanLimitStatus, getPlan } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
-  const inventoryData = await fetchShopifyInventory(admin, session.shop);
   const subscription = await getShopSubscription(session.shop);
+  const plan = getPlan(subscription?.plan);
+
+  // Stockout Risk Radar & velocity forecasting is a Pro feature. Gated in the
+  // loader, not in the markup: hiding the table client-side would still ship
+  // every product's velocity and reorder figures to a browser on the free tier.
+  if (!plan.features.stockRadar) {
+    return {
+      shop: session.shop,
+      items: [],
+      settings: null,
+      subscription,
+      plan,
+      locked: true,
+    };
+  }
+
+  const inventoryData = await fetchShopifyInventory(admin, session.shop);
   return {
     shop: session.shop,
     items: inventoryData.items,
     settings: inventoryData.settings,
     subscription,
+    plan,
+    locked: false,
   };
 };
 
 export default function StockRadar() {
-  const { shop, items, settings, subscription } = useLoaderData();
+  const { shop, items, settings, subscription, plan, locked } = useLoaderData();
   const shopify = useAppBridge();
   const [filterRisk, setFilterRisk] = useState("ALL");
   const [searchTerm, setSearchTerm] = useState("");
@@ -90,6 +108,41 @@ export default function StockRadar() {
     document.body.removeChild(link);
     shopify?.toast?.show?.("Exported Reorder Forecast CSV");
   };
+
+  // Placed after every hook so the hook order stays identical between the locked
+  // and unlocked renders.
+  if (locked) {
+    return (
+      <div className="stock-container" style={{ paddingBottom: "40px" }}>
+        <div className="stock-header">
+          <div>
+            <h1>Stockout Risk Radar &amp; Forecast Engine</h1>
+            <p>Predictive inventory run-rate analytics, days of supply remaining &amp; supplier reorder recommendations</p>
+          </div>
+        </div>
+
+        <div
+          className="table-card"
+          style={{ padding: "48px 24px", textAlign: "center", maxWidth: "640px", margin: "0 auto" }}
+        >
+          <div style={{ fontSize: "40px", lineHeight: 1, marginBottom: "16px" }}>🔒</div>
+          <h2 style={{ margin: "0 0 8px 0", fontSize: "20px", color: "#312e81" }}>
+            Stockout Risk Radar is a Pro feature
+          </h2>
+          <p style={{ fontSize: "14px", color: "var(--text-muted)", margin: "0 0 8px 0" }}>
+            Sales-velocity forecasting, days-of-supply risk scoring and reorder quantity
+            recommendations are included from the Pro plan upwards.
+          </p>
+          <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: "0 0 24px 0" }}>
+            Your store is on the <strong>{plan?.name}</strong> plan.
+          </p>
+          <a href="/app/plan" className="btn-primary" style={{ textDecoration: "none" }}>
+            View plans &amp; upgrade
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="stock-container" style={{ paddingBottom: "40px" }}>

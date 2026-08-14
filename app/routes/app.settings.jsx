@@ -1,4 +1,3 @@
-/* global process */
 import { useState, useEffect } from "react";
 import { useLoaderData, useFetcher, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -7,39 +6,25 @@ import { authenticate } from "../shopify.server";
 import {
   getInventorySettings,
   updateInventorySettings,
-  getShopSubscription,
-  updateShopSubscription,
+  syncSubscriptionFromShopify,
   createAutomationLog,
   createSupportTicket,
   getSupportTickets,
   updateSupportTicketStatus,
 } from "../models/inventory.server";
+import { getPlan } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const url = new URL(request.url);
-  const chargeApproved = url.searchParams.get("charge_approved");
-  const planToActivate = url.searchParams.get("plan");
 
-  let activatedPlan = null;
-  if (chargeApproved === "true" && planToActivate) {
-    await updateShopSubscription(session.shop, planToActivate);
-    activatedPlan = planToActivate;
-    await createAutomationLog({
-      shop: session.shop,
-      eventType: "BILLING_ACTIVATE",
-      productId: "N/A",
-      productTitle: `Subscription Upgraded to ${planToActivate}`,
-      variantTitle: "Shopify Billing Confirmed",
-      sku: "N/A",
-      quantity: 0,
-      actionTaken: `Merchant confirmed Shopify billing approval. Activated ${planToActivate} plan features.`,
-      status: "SUCCESS",
-    });
-  }
+  // Billing now lives on /app/plan, but this route used to activate a plan
+  // straight from `?charge_approved=true&plan=…` — a query string any merchant
+  // can type. The stored plan is reconciled with Shopify's own billing record
+  // instead, and this page never grants a tier.
+  const { subscription } = await syncSubscriptionFromShopify(admin, session.shop);
 
   const settings = await getInventorySettings(session.shop);
-  const subscription = await getShopSubscription(session.shop);
   const supportTickets = await getSupportTickets(session.shop, 50);
   const initialTab = url.searchParams.get("tab") || "general";
 
@@ -47,15 +32,14 @@ export const loader = async ({ request }) => {
     shop: session.shop,
     settings,
     subscription,
+    plan: getPlan(subscription?.plan),
     supportTickets,
     initialTab,
-    chargeApproved: chargeApproved === "true",
-    activatedPlan,
   };
 };
 
 export const action = async ({ request }) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent");
 
@@ -109,116 +93,9 @@ export const action = async ({ request }) => {
     return { success: true, type: "ticket_reply", updatedTicket: updated, supportTickets };
   }
 
-  if (intent === "change_plan") {
-    const plan = formData.get("plan") || "GROWTH";
-
-    if (plan === "FREE") {
-      const updatedSub = await updateShopSubscription(session.shop, "FREE");
-      return { success: true, subscription: updatedSub };
-    }
-
-    const priceMap = { GROWTH: 5.99, PRO: 19.99, ENTERPRISE: 39.99 };
-    const price = priceMap[plan] || 19.99;
-    // Shopify admin resolves app deep links by client_id, so the API key is the only
-    // segment guaranteed to exist. Using the app name/handle 404s whenever the handle
-    // registered on the app differs from SHOPIFY_APP_NAME.
-    const appIdentifier = (
-      process.env.SHOPIFY_API_KEY ||
-      process.env.SHOPIFY_APP_NAME ||
-      process.env.SHOPIFY_APP_HANDLE ||
-      "stockshield"
-    ).trim();
-    const returnUrl = `https://${session.shop}/admin/apps/${appIdentifier}/app/settings?charge_approved=true&plan=${plan}`;
-
-    // Test charges skip payment-method collection entirely, so the merchant never gets
-    // the card step. Real charges need test: false AND a store that can actually be
-    // billed — development stores can't incur real charges regardless of this flag.
-    const isTestCharge = process.env.SHOPIFY_BILLING_TEST
-      ? process.env.SHOPIFY_BILLING_TEST === "true"
-      : process.env.NODE_ENV !== "production";
-
-    let billingError = null;
-
-    try {
-      const response = await admin.graphql(
-        `#graphql
-          mutation appSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean) {
-            appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test) {
-              userErrors { field message }
-              confirmationUrl
-            }
-          }
-        `,
-        {
-          variables: {
-            name: `StockShield ${plan} Plan`,
-            returnUrl,
-            test: isTestCharge,
-            lineItems: [
-              {
-                plan: {
-                  appRecurringPricingDetails: {
-                    price: { amount: price, currencyCode: "USD" },
-                    interval: "EVERY_30_DAYS",
-                  },
-                },
-              },
-            ],
-          },
-        }
-      );
-      const json = await response.json();
-      const result = json.data?.appSubscriptionCreate;
-      const userErrors = result?.userErrors || [];
-
-      if (userErrors.length) {
-        billingError = userErrors.map((e) => e.message).join("; ");
-      } else if (result?.confirmationUrl) {
-        // Do NOT change DB plan yet! Return confirmationUrl so merchant approves via Shopify billing first.
-        // The loader activates the plan when Shopify redirects back to returnUrl.
-        return { success: true, confirmationUrl: result.confirmationUrl, plan };
-      } else {
-        billingError = "Shopify returned no confirmation URL for this charge.";
-      }
-    } catch (err) {
-      billingError = err.message;
-    }
-
-    // Past this point the charge was never created, so the plan must NOT be activated.
-    console.error(`[billing] ${session.shop} could not start ${plan}: ${billingError}`);
-
-    try {
-      await createAutomationLog({
-        shop: session.shop,
-        eventType: "BILLING_FAILED",
-        productId: "N/A",
-        productTitle: `Subscription to ${plan} could not be started`,
-        variantTitle: "Shopify Billing Rejected",
-        sku: "N/A",
-        quantity: 0,
-        actionTaken: `appSubscriptionCreate did not return a confirmation URL. Plan left unchanged. Reason: ${billingError}`,
-        status: "FAILED",
-      });
-    } catch (logErr) {
-      console.error("[billing] could not write BILLING_FAILED log:", logErr.message);
-    }
-
-    // Dev-only escape hatch for working on paid-plan features without a billable store.
-    // Requires BOTH a non-production build and an explicit opt-in, so it can never
-    // grant a paid plan for free in production.
-    if (process.env.NODE_ENV !== "production" && process.env.SHOPIFY_BILLING_DEV_BYPASS === "true") {
-      console.warn(`[billing] SHOPIFY_BILLING_DEV_BYPASS active — granting ${plan} to ${session.shop} with no charge.`);
-      const updatedSub = await updateShopSubscription(session.shop, plan);
-      return { success: true, subscription: updatedSub, plan, devBypass: true };
-    }
-
-    return {
-      success: false,
-      type: "billing_error",
-      plan,
-      error: `Could not start the ${plan} subscription: ${billingError}`,
-    };
-  }
+  // Plan changes are handled by /app/plan, which is the only route that talks to
+  // Shopify Billing. Leaving a second copy here meant two places could grant a
+  // tier, and this one did it without verifying the charge.
 
   if (intent === "save_email_settings") {
     const emailAlertsRaw = formData.get("enableEmailAlerts");
@@ -255,7 +132,7 @@ export const action = async ({ request }) => {
 
 
 export default function Settings() {
-  const { shop, settings, subscription: loaderSub, supportTickets: initialTickets, initialTab, chargeApproved, activatedPlan } = useLoaderData();
+  const { shop, settings, plan, supportTickets: initialTickets, initialTab } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -266,9 +143,6 @@ export default function Settings() {
       setActiveTab(initialTab);
     }
   }, [initialTab]);
-
-  const currentPlan = fetcher.data?.subscription?.plan || loaderSub?.plan || "GROWTH";
-  const [selectedPlan, setSelectedPlan] = useState(currentPlan);
 
   // Support Form State
   const [supportName, setSupportName] = useState("");
@@ -298,24 +172,6 @@ export default function Settings() {
   const isSendingSupport = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "send_support_request";
 
   useEffect(() => {
-    if (chargeApproved && activatedPlan) {
-      shopify?.toast?.show?.(`Plan ${activatedPlan} successfully activated via Shopify Billing!`);
-    }
-  }, [chargeApproved, activatedPlan, shopify]);
-
-  useEffect(() => {
-    if (fetcher.data?.confirmationUrl) {
-      const confirmUrl = fetcher.data.confirmationUrl;
-      shopify?.toast?.show?.("Redirecting to Shopify Billing...");
-      if (window.top) {
-        window.top.location.href = confirmUrl;
-      } else {
-        window.location.href = confirmUrl;
-      }
-    }
-  }, [fetcher.data, shopify]);
-
-  useEffect(() => {
     if (fetcher.data?.type === "support" && fetcher.data?.success) {
       shopify?.toast?.show?.(`Support ticket ${fetcher.data.ticket?.ticketId || ""} submitted!`);
       setLastTicket(fetcher.data.ticket);
@@ -330,43 +186,8 @@ export default function Settings() {
     }
   }, [fetcher.data, shopify]);
 
-  useEffect(() => {
-    if (fetcher.data?.subscription?.plan) {
-      setSelectedPlan(fetcher.data.subscription.plan);
-      if (fetcher.data.devBypass) {
-        shopify?.toast?.show?.(`${fetcher.data.plan} activated via dev bypass — no charge was made.`);
-      }
-    }
-  }, [fetcher.data, shopify]);
-
-  useEffect(() => {
-    if (loaderSub?.plan) {
-      setSelectedPlan(loaderSub.plan);
-    }
-  }, [loaderSub?.plan]);
-
-  useEffect(() => {
-    if (fetcher.data?.type === "billing_error") {
-      // The charge was never created, so keep showing whatever plan is actually active.
-      setSelectedPlan(currentPlan);
-      shopify?.toast?.show?.(fetcher.data.error, { isError: true });
-    }
-  }, [fetcher.data, currentPlan, shopify]);
-
   const isSavingThresholds = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_thresholds";
   const isSavingEmail = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_email_settings";
-  const isChangingPlan = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "change_plan";
-  const targetPlan = isChangingPlan ? fetcher.formData?.get("plan") : null;
-
-  const handlePlanSelect = (planName) => {
-    // No optimistic switch here: a paid plan is only really selected once Shopify has
-    // accepted the charge, so the card highlight follows the server response instead.
-    fetcher.submit(
-      { intent: "change_plan", plan: planName },
-      { method: "post" }
-    );
-  };
-
   const handleCopyEmail = () => {
     navigator.clipboard.writeText("sandeepptpss@gmail.com");
     shopify?.toast?.show?.("Copied email: sandeepptpss@gmail.com");
@@ -588,6 +409,35 @@ export default function Settings() {
               <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "20px" }}>
                 Receive transactional email notifications directly to your inbox whenever inventory items go out of stock or are restocked.
               </p>
+
+              {/* Merchant email notifications start at Growth. The preferences stay
+                  editable so they survive a downgrade, but nothing is sent until the
+                  plan covers them — which is what the engine enforces. */}
+              {!plan?.features?.emailAlerts && (
+                <div
+                  style={{
+                    background: "#eef2ff",
+                    border: "1px solid #c7d2fe",
+                    borderRadius: "10px",
+                    padding: "14px 16px",
+                    marginBottom: "20px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: "12px",
+                  }}
+                >
+                  <span style={{ fontSize: "13px", color: "#3730a3" }}>
+                    🔒 Merchant email notifications are not included in the{" "}
+                    <strong>{plan?.name}</strong> plan — no alerts are sent while these
+                    preferences are saved.
+                  </span>
+                  <a href="/app/plan" style={{ fontSize: "13px", fontWeight: 600, color: "#4f46e5" }}>
+                    Upgrade to Growth →
+                  </a>
+                </div>
+              )}
 
               <div className="form-switch" style={{ marginBottom: "20px", background: "#f8fafc", padding: "16px", borderRadius: "10px", border: "1px solid #e2e8f0" }}>
                 <div>

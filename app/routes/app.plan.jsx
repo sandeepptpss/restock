@@ -5,41 +5,68 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
-  getShopSubscription,
   updateShopSubscription,
   createAutomationLog,
+  syncSubscriptionFromShopify,
+  cancelActiveSubscriptions,
 } from "../models/inventory.server";
+import { getPlan, PLAN_ORDER } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const url = new URL(request.url);
   const chargeApproved = url.searchParams.get("charge_approved");
   const planToActivate = url.searchParams.get("plan");
 
-  let activatedPlan = null;
-  if (chargeApproved === "true" && planToActivate) {
-    await updateShopSubscription(session.shop, planToActivate);
-    activatedPlan = planToActivate;
-    await createAutomationLog({
-      shop: session.shop,
-      eventType: "BILLING_ACTIVATE",
-      productId: "N/A",
-      productTitle: `Subscription Upgraded to ${planToActivate}`,
-      variantTitle: "Shopify Billing Confirmed",
-      sku: "N/A",
-      quantity: 0,
-      actionTaken: `Merchant confirmed Shopify billing approval. Activated ${planToActivate} plan features.`,
-      status: "SUCCESS",
-    });
-  }
+  // The stored plan is reconciled with Shopify's billing record on every visit,
+  // never taken from the query string. `?charge_approved=true&plan=ENTERPRISE`
+  // is something a merchant can type into the address bar, and taking it at face
+  // value handed out the top tier for free; a charge that was declined or a
+  // subscription cancelled in the Shopify admin also has to land somewhere.
+  const { subscription, changed } = await syncSubscriptionFromShopify(admin, session.shop);
 
-  const subscription = await getShopSubscription(session.shop);
+  let activatedPlan = null;
+  let activationRejected = null;
+  if (chargeApproved === "true" && planToActivate) {
+    const confirmed = subscription?.plan === planToActivate.toUpperCase();
+    activatedPlan = confirmed ? subscription.plan : null;
+    activationRejected = confirmed ? null : planToActivate.toUpperCase();
+
+    // Written only when the plan really moved, so returning to this URL — which
+    // React Router does once for the document and once for the data request —
+    // cannot fill the audit trail with repeated "upgraded" entries.
+    if (confirmed && changed) {
+      await createAutomationLog({
+        shop: session.shop,
+        eventType: "BILLING_ACTIVATE",
+        productTitle: `Subscription activated: ${subscription.plan}`,
+        variantTitle: "Shopify Billing Confirmed",
+        actionTaken: `Shopify confirms an active ${subscription.plan} subscription. Plan features enabled.`,
+        status: "SUCCESS",
+      });
+    } else if (!confirmed) {
+      console.warn(
+        `[billing] ${session.shop} returned with charge_approved for ${planToActivate}, but Shopify reports ${subscription?.plan}. Plan left unchanged.`
+      );
+      await createAutomationLog({
+        shop: session.shop,
+        eventType: "BILLING_REJECTED",
+        productTitle: `${planToActivate.toUpperCase()} activation not confirmed`,
+        variantTitle: "Shopify Billing",
+        actionTaken: `Return URL claimed ${planToActivate.toUpperCase()}, but Shopify has no matching active subscription. Plan stays ${subscription?.plan}.`,
+        status: "FAILED",
+      }).catch(() => {});
+    }
+  }
 
   return {
     shop: session.shop,
     subscription,
+    plan: getPlan(subscription?.plan),
+    planOrder: PLAN_ORDER,
     chargeApproved: chargeApproved === "true",
     activatedPlan,
+    activationRejected,
   };
 };
 
@@ -52,7 +79,30 @@ export const action = async ({ request }) => {
     const plan = formData.get("plan") || "GROWTH";
 
     if (plan === "FREE") {
+      // Downgrading has to stop the recurring charge as well as the features —
+      // storing FREE on its own would leave the merchant paying for a tier the
+      // app no longer gives them.
+      const { cancelled, errors } = await cancelActiveSubscriptions(admin);
+      if (errors.length > 0) {
+        console.error(`[billing] ${session.shop} downgrade cancellation errors:`, errors);
+        return {
+          success: false,
+          type: "billing_error",
+          plan: "FREE",
+          error: `Could not cancel the active subscription: ${errors.join("; ")}`,
+        };
+      }
+
       const updatedSub = await updateShopSubscription(session.shop, "FREE");
+      await createAutomationLog({
+        shop: session.shop,
+        eventType: "BILLING_DOWNGRADE",
+        productTitle: "Subscription downgraded to Starter / Free",
+        variantTitle: "Shopify Billing",
+        actionTaken: `Cancelled ${cancelled} active subscription(s) and moved the shop to the FREE plan.`,
+        status: "SUCCESS",
+      }).catch(() => {});
+
       return { success: true, subscription: updatedSub };
     }
 
@@ -151,18 +201,28 @@ export const action = async ({ request }) => {
 };
 
 export default function PlanPage() {
-  const { shop, subscription: loaderSub, chargeApproved, activatedPlan } = useLoaderData();
+  const { shop, subscription: loaderSub, chargeApproved, activatedPlan, activationRejected } =
+    useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
-  const currentPlan = fetcher.data?.subscription?.plan || loaderSub?.plan || "GROWTH";
+  const currentPlan = fetcher.data?.subscription?.plan || loaderSub?.plan || "FREE";
   const [selectedPlan, setSelectedPlan] = useState(currentPlan);
 
   useEffect(() => {
     if (chargeApproved && activatedPlan) {
       shopify?.toast?.show?.(`Plan ${activatedPlan} successfully activated via Shopify Billing!`);
     }
-  }, [chargeApproved, activatedPlan, shopify]);
+    // Returned from billing, but Shopify has no matching active subscription —
+    // a declined or abandoned charge. Said plainly rather than silently leaving
+    // the merchant looking at their old plan.
+    if (activationRejected) {
+      shopify?.toast?.show?.(
+        `${activationRejected} was not activated — Shopify has no active subscription for it.`,
+        { isError: true }
+      );
+    }
+  }, [chargeApproved, activatedPlan, activationRejected, shopify]);
 
   useEffect(() => {
     if (fetcher.data?.confirmationUrl) {

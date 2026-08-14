@@ -10,7 +10,7 @@ import {
   fetchShopifyInventory,
   getShopSubscription,
 } from "../models/inventory.server";
-import { checkPlanLimitStatus } from "../utils/planLimits";
+import { checkPlanLimitStatus, getPlan } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -19,9 +19,13 @@ export const loader = async ({ request }) => {
   const subscription = await getShopSubscription(session.shop);
 
   return {
+    // The merchant's own choices, not the plan-clamped ones the engine acts on:
+    // a downgrade must not look like the app forgot what they configured. The
+    // banner below says which of them the current plan actually runs.
     settings,
     totalItems: inventoryData.items.length,
     subscription,
+    plan: getPlan(subscription?.plan),
   };
 };
 
@@ -57,13 +61,24 @@ export const action = async ({ request }) => {
   return { success: true, settings: updated };
 };
 
+// The automations the engine will refuse to run, given the plan. Kept in the
+// same order as the rules below so the banner reads like the form.
+const PLAN_GATED_RULES = [
+  ["autoHide", "Auto-hide sold-out products"],
+  ["autoPublish", "Auto-publish back-in-stock products"],
+  ["restockDelay", "Dynamic restock delay timers"],
+  ["autoFill", "Scheduled inventory auto-fill"],
+  ["emailAlerts", "Merchant email notifications"],
+];
+
 export default function AutomationRules() {
-  const { settings: loaderSettings, totalItems, subscription } = useLoaderData();
+  const { settings: loaderSettings, totalItems, subscription, plan } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
   const planStatus = checkPlanLimitStatus(subscription?.plan, totalItems || 0);
   const { isBreached, promptMessage, targetUpgradePlan } = planStatus;
+  const lockedRules = PLAN_GATED_RULES.filter(([key]) => !plan?.features?.[key]);
 
   const settings = fetcher.data?.settings || loaderSettings;
 
@@ -109,6 +124,37 @@ export default function AutomationRules() {
           </span>
         </div>
       </div>
+
+      {/* Automations the current plan does not run */}
+      {lockedRules.length > 0 && (
+        <div
+          style={{
+            background: "linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%)",
+            border: "1px solid #c7d2fe",
+            borderRadius: "12px",
+            padding: "16px 20px",
+            marginBottom: "20px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
+          <div>
+            <strong style={{ display: "block", fontSize: "14px", color: "#312e81", marginBottom: "4px" }}>
+              🔒 Not included in the {plan?.name} plan
+            </strong>
+            <span style={{ fontSize: "13px", color: "#4338ca" }}>
+              {lockedRules.map(([, label]) => label).join(" · ")} — these settings are saved, but
+              stay switched off until your plan covers them. Out-of-stock tagging keeps running.
+            </span>
+          </div>
+          <a href="/app/plan" className="btn-primary" style={{ textDecoration: "none", whiteSpace: "nowrap" }}>
+            Compare plans
+          </a>
+        </div>
+      )}
 
       {/* Plan Limit Exceeded Banner */}
       {isBreached && (

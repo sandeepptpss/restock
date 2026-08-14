@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { data, useLoaderData, useRouteError, useRevalidator } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { getAutomationLogs } from "../models/inventory.server";
+import { getAutomationLogs, getShopSubscription } from "../models/inventory.server";
+import { getPlan } from "../utils/planLimits";
 
 // Audit logs are written by webhooks/scans at any time, so neither the browser
 // nor any proxy in front of the app may hold on to a previous response.
@@ -14,14 +15,17 @@ const NO_STORE_HEADERS = {
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
+  // getAutomationLogs applies the plan's retention window itself; the plan is
+  // resolved here too so the page can say which window the merchant is seeing.
   const logs = await getAutomationLogs(session.shop, 500);
+  const plan = getPlan((await getShopSubscription(session.shop))?.plan);
   // `data()` keeps React Router's own serialization (so `headers` below reach
   // both the document and the `.data` request) instead of a hand-rolled Response.
-  return data({ logs }, { headers: NO_STORE_HEADERS });
+  return data({ logs, plan }, { headers: NO_STORE_HEADERS });
 };
 
 export default function AutomationLogs() {
-  const { logs } = useLoaderData();
+  const { logs, plan } = useLoaderData();
   const revalidator = useRevalidator();
 
   const [filterType, setFilterType] = useState("ALL");
@@ -102,6 +106,16 @@ export default function AutomationLogs() {
         <div>
           <h1>Automation Audit Trail &amp; Logs</h1>
           <p>Real-time log of every automatic action, tag modification, product status change, and alert</p>
+          <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "4px" }}>
+            {plan?.logRetentionDays == null ? (
+              <>Unlimited audit retention on the {plan?.name} plan.</>
+            ) : (
+              <>
+                Showing the last {plan?.logRetentionDays} days — audit retention on the{" "}
+                {plan?.name} plan. <a href="/app/plan">Upgrade for longer history</a>.
+              </>
+            )}
+          </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
           {isRefreshing && (

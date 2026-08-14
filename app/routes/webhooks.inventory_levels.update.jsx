@@ -1,6 +1,6 @@
 import { authenticate, unauthenticated } from "../shopify.server";
 import {
-  getInventorySettings,
+  getEffectiveSettings,
   getProductThresholds,
   recordInventoryEvent,
   annotateInventoryEvent,
@@ -81,7 +81,7 @@ export const action = async ({ request }) => {
 
     // 2. Load the shop's configuration up front: it decides both whether this
     // change is actionable at all and what to do about it.
-    const settings = await getInventorySettings(shop);
+    const settings = await getEffectiveSettings(shop);
     const customThresholds = await getProductThresholds(shop);
 
     // Resolving this variant's exact low-stock threshold needs the product, which
@@ -440,12 +440,26 @@ export const action = async ({ request }) => {
           return;
         }
 
+        // ARCHIVED or merchant DRAFT guard: if product is ARCHIVED or DRAFT (and not app-hidden), skip auto-unhide/republish!
+        const isArchived = product.status === "ARCHIVED";
+        const isDraftNotAppHidden =
+          product.status === "DRAFT" &&
+          (settings.visibilityMode !== "DRAFT" || !existingTags.includes(tagToRemove));
+
+        if (isArchived || isDraftNotAppHidden) {
+          console.log(
+            `[Webhook] ${product.title} is ${product.status} (manually set by merchant) — skipping auto-unhide/republish`
+          );
+          return;
+        }
+
         const tagNeedsRemoving = settings.enableAutoTag !== false && existingTags.includes(tagToRemove);
         const visibilityNeedsRestoring =
           settings.enableAutoPublish !== false &&
           needsVisibilityRestore(
-            { status: product.status, seoHidden: product.seoHidden?.value ?? null },
-            settings.visibilityMode
+            { status: product.status, seoHidden: product.seoHidden?.value ?? null, tags: existingTags },
+            settings.visibilityMode,
+            settings
           );
 
         // Nothing left to undo — the product is already visible and untagged, which
@@ -527,6 +541,8 @@ export const action = async ({ request }) => {
             productId: product.id,
             visibilityMode: settings.visibilityMode,
             shop,
+            productStatus: product.status,
+            productTags: existingTags,
           });
           if (restored.errors.length > 0) restockErrors.push(...restored.errors);
           actions.push(`${restored.action} [${restored.mode}]`);
