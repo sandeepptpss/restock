@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="none">
+  <defs>
+    <linearGradient id="topFace" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+    <linearGradient id="leftFace" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+    <linearGradient id="rightFace" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#0e7490" />
+    </linearGradient>
+  </defs>
+  <!-- Top Face -->
+  <path d="M8 1.5L13.5 4.3L8 7.1L2.5 4.3L8 1.5Z" fill="url(#topFace)" />
+  <!-- Left Face -->
+  <path d="M2.5 4.3L8 7.1V14.5L2.5 11.7V4.3Z" fill="url(#leftFace)" />
+  <!-- Right Face -->
+  <path d="M8 7.1L13.5 4.3V11.7L8 14.5V7.1Z" fill="url(#rightFace)" />
+</svg>
