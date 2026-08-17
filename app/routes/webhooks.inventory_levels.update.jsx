@@ -136,8 +136,9 @@ export const action = async ({ request }) => {
                 title
                 status
                 tags
-                # Set by the UNLISTED/ACTIVE_HIDDEN visibility modes, which keep the
-                # product ACTIVE — the only way to tell that the app hid it.
+                # The trace older versions of the ACTIVE_HIDDEN mode left behind,
+                # before it switched to Shopify's UNLISTED product status. Still read
+                # so a restock recognises — and clears — a product hidden the old way.
                 seoHidden: metafield(namespace: "seo", key: "hidden") {
                   value
                 }

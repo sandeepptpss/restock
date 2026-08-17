@@ -9,8 +9,9 @@ import {
   createAutomationLog,
   syncSubscriptionFromShopify,
   cancelActiveSubscriptions,
+  getShopSubscription,
 } from "../models/inventory.server";
-import { getPlan, PLAN_ORDER } from "../utils/planLimits";
+import { getPlan, normalizePlan, PLAN_ORDER, PLAN_PRICES } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -106,8 +107,27 @@ export const action = async ({ request }) => {
       return { success: true, subscription: updatedSub };
     }
 
-    const priceMap = { GROWTH: 9.99, PRO: 19.99, ENTERPRISE: 49.99 };
-    const price = priceMap[plan] || 19.99;
+    // Read from the plan matrix, never re-typed here. A local price map meant
+    // editing planLimits.js moved the pricing table while the actual charge stayed
+    // where it was — the merchant would be billed an amount the app no longer
+    // advertised, and fetchActivePlanFromShopify (which matches on the charged
+    // amount) would stop recognising the plan.
+    const price = PLAN_PRICES[normalizePlan(plan)];
+    if (!price) {
+      return {
+        success: false,
+        type: "billing_error",
+        plan,
+        error: `${plan} is not a billable plan.`,
+      };
+    }
+
+    // The Plan page advertises a 7-day free trial, so the charge has to ask for one.
+    // Granted once per shop: trialDays applies to each subscription Shopify creates,
+    // so without the flag a merchant could switch plans repeatedly and never pay.
+    const stored = await getShopSubscription(session.shop);
+    const trialDays = stored?.trialUsed ? 0 : 7;
+
     const appIdentifier = (
       process.env.SHOPIFY_API_KEY ||
       process.env.SHOPIFY_APP_NAME ||
@@ -125,8 +145,8 @@ export const action = async ({ request }) => {
     try {
       const response = await admin.graphql(
         `#graphql
-          mutation appSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean) {
-            appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test) {
+          mutation appSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean, $trialDays: Int) {
+            appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test, trialDays: $trialDays) {
               userErrors { field message }
               confirmationUrl
             }
@@ -137,6 +157,7 @@ export const action = async ({ request }) => {
             name: `StockShield ${plan} Plan`,
             returnUrl,
             test: isTestCharge,
+            trialDays,
             lineItems: [
               {
                 plan: {
@@ -339,7 +360,7 @@ export default function PlanPage() {
             Select the Best Plan for Your Store
           </h2>
           <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
-            Transparent pricing tailored to catalog size &amp; inventory automation needs. All paid plans include a 7-day free trial on Shopify.
+            Transparent pricing tailored to catalog size &amp; inventory automation needs. All paid plans include a 7-day free trial on Shopify, once per store.
           </p>
         </div>
 

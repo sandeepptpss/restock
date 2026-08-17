@@ -85,5 +85,8 @@ Manage your store preferences, subscription plan, and support.
 #### Q4: What happens if I uncheck "Stock Control Embed" in Shopify Theme Editor?
 > Backend auto-hiding and auto-tagging will **still work 100%** because server-side rules run independently in Shopify Admin. However, buyer-facing popups like *"Notify Me When Back in Stock"* and *"Only 2 left in stock!"* badges will not be visible to storefront visitors unless the embed is checked (turned ON).
 
+#### Q4b: Do I need to configure anything inside the "Stock Control Embed" block?
+> **No.** The embed has no settings of its own — switching it ON is the only step. Auto-hide, visibility mode, tags, restock timers and the low-stock badge are all configured in **Automation Rules** (`/app/rules`), so your settings survive a theme switch or theme duplicate instead of resetting.
+
 #### Q5: Can I keep products visible and ONLY apply out-of-stock tags?
 > **Yes!** Go to **Automation Rules** (`/app/rules`), and set **Visibility Mode Action** to **TAG_ONLY** (or uncheck *"Auto-Hide Storefront Action"*). This keeps sold-out products active on your storefront while applying `out-of-stock` tags for your theme.

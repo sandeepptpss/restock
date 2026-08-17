@@ -9,6 +9,7 @@ import {
   runStockoutAutomationScan,
   fetchShopifyInventory,
   getShopSubscription,
+  syncStorefrontConfig,
 } from "../models/inventory.server";
 import { checkPlanLimitStatus, getPlan } from "../utils/planLimits";
 
@@ -38,6 +39,8 @@ export const action = async ({ request }) => {
     variantStrategy: formData.get("variantStrategy") || "HIDE_ALL_OOS",
     outOfStockTag: formData.get("outOfStockTag") || "out-of-stock",
     lowStockTag: formData.get("lowStockTag") || "low-stock",
+    enableLowStockBadge: formData.has("enableLowStockBadge"),
+    lowStockBadgeText: formData.get("lowStockBadgeText") || "🔥 Only a few items left in stock!",
     leadTimeDays: formData.get("leadTimeDays"),
     targetStockDays: formData.get("targetStockDays"),
     enableAutoTag: formData.has("enableAutoTag"),
@@ -56,13 +59,18 @@ export const action = async ({ request }) => {
       restockDelayValue: formData.get("restockDelayValue"),
       restockDelayUnit: formData.get("restockDelayUnit") || "IMMEDIATE",
     } : {}),
-    ...(features.emailAlerts ? {
-      enableEmailAlerts: formData.has("enableEmailAlerts"),
+    ...(features.emailAlerts && formData.has("enableEmailAlerts") ? {
+      enableEmailAlerts: formData.get("enableEmailAlerts") === "on" || formData.get("enableEmailAlerts") === "true",
       alertEmail: formData.get("alertEmail"),
     } : {}),
   };
 
   const updated = await updateInventorySettings(session.shop, data);
+
+  // Push the storefront-facing slice of these settings to the theme app embed's
+  // metafield before the scan, so the storefront reflects the save even if the
+  // catalogue scan below fails.
+  await syncStorefrontConfig(admin, session.shop);
 
   await runStockoutAutomationScan(admin, session.shop);
 
@@ -97,6 +105,7 @@ export default function AutomationRules() {
   const [autoFillEnabled, setAutoFillEnabled] = useState(Boolean(settings.enableAutoFill));
   const [taggingEnabled, setTaggingEnabled] = useState(settings.enableAutoTag !== false);
   const [autoHideEnabled, setAutoHideEnabled] = useState(settings.enableAutoHide !== false);
+  const [lowStockBadgeEnabled, setLowStockBadgeEnabled] = useState(settings.enableLowStockBadge !== false);
 
   useEffect(() => {
     if (settings) {
@@ -106,6 +115,7 @@ export default function AutomationRules() {
       setAutoFillEnabled(Boolean(settings.enableAutoFill));
       setTaggingEnabled(settings.enableAutoTag !== false);
       setAutoHideEnabled(settings.enableAutoHide !== false);
+      setLowStockBadgeEnabled(settings.enableLowStockBadge !== false);
     }
   }, [settings]);
 
@@ -686,10 +696,10 @@ export default function AutomationRules() {
                   onChange={(e) => setSelectedVariantStrat(e.target.value)}
                   style={{ background: "#ffffff", fontWeight: "600" }}
                 >
-                  <option value="HIDE_ALL_OOS">Hide product ONLY when ALL sellable variants are 0 (Recommended)</option>
+                  <option value="HIDE_ALL_OOS">Hide product ONLY when ALL variants are 0 (Recommended)</option>
                   <option value="HIDE_ANY_OOS">Hide product when ANY single variant is 0</option>
-                  <option value="HIDE_THRESHOLD">Hide product when available variants drop below 2</option>
-                  <option value="KEEP_VISIBLE">Keep product visible (disable out-of-stock variants only)</option>
+                  <option value="HIDE_THRESHOLD">Hide multi-variant product when fewer than 2 variants are in stock</option>
+                  <option value="KEEP_VISIBLE">Never hide the product (leave sold-out variants to your theme)</option>
                 </select>
               </div>
 
@@ -704,16 +714,16 @@ export default function AutomationRules() {
                 color: "#1e293b"
               }}>
                 {selectedVariantStrat === "HIDE_ALL_OOS" && (
-                  <span><strong>Recommended Default:</strong> Keeps product visible on storefront as long as at least 1 variant (e.g. Size M) is in stock. Hides product only when 100% sold out.</span>
+                  <span><strong>Recommended Default:</strong> Keeps product visible on storefront as long as at least 1 variant (e.g. Size M) has stock above 0. Hides product only when every variant reads 0 or less. Note: variants set to <em>continue selling when out of stock</em>, or with inventory tracking off, still count as out of stock here.</span>
                 )}
                 {selectedVariantStrat === "HIDE_ANY_OOS" && (
                   <span><strong>Strict Hiding:</strong> Hides the entire product page immediately if even 1 variant (e.g. Size Small) runs out of stock, even if other sizes are available.</span>
                 )}
                 {selectedVariantStrat === "HIDE_THRESHOLD" && (
-                  <span><strong>Low Stock Buffer:</strong> Hides product when available variants drop below 2 to prevent overselling low-inventory items.</span>
+                  <span><strong>Low Stock Buffer:</strong> Hides a multi-variant product once fewer than 2 of its variants have stock, to stop the last size selling out unnoticed. The count is fixed at 2 and does not follow your low stock threshold. Single-variant products are unaffected until they hit 0.</span>
                 )}
                 {selectedVariantStrat === "KEEP_VISIBLE" && (
-                  <span><strong>Always Visible:</strong> Product page is never hidden. Sold-out variants will be disabled by your theme.</span>
+                  <span><strong>Always Visible:</strong> The app never hides or unpublishes the product. Shopify already makes a variant unpurchasable at 0, so your theme shows it as sold out on its own — the app takes no action here beyond tagging.</span>
                 )}
               </div>
             </div>
@@ -751,7 +761,7 @@ export default function AutomationRules() {
                   <span>⚡ 1-Click Setup:</span>
                 </div>
                 <span style={{ fontSize: "12px", color: "#0e7490", display: "block", marginTop: "2px" }}>
-                  Turn ON <strong>Stock Control Embed</strong> in your Shopify Theme Editor once. All hiding &amp; storefront visibility rules are managed 100% directly from this App Dashboard!
+                  Turn ON <strong>Stock Control Embed</strong> in your Shopify Theme Editor once — it has no settings of its own to configure. All hiding, storefront visibility and badge rules are managed 100% directly from this App Dashboard!
                 </span>
               </div>
 
@@ -800,8 +810,8 @@ export default function AutomationRules() {
                 >
                   <option value="ACTIVE_HIDDEN">Hide from Catalog &amp; Search (Keep Product Link Working - Recommended)</option>
                   <option value="DRAFT">Set Status to Draft (Completely Hide Product)</option>
-                  <option value="TAG_ONLY">Keep Product Visible (Apply Out-of-Stock Tag Only)</option>
-                  <option value="UNPUBLISH_CHANNEL">Unpublish from Online Store Channel</option>
+                  <option value="TAG_ONLY">Keep Product Visible (No Hiding At All)</option>
+                  <option value="UNPUBLISH_CHANNEL">Unpublish from Online Store Channel (Product URL Returns 404)</option>
                 </select>
               </div>
 
@@ -827,16 +837,16 @@ export default function AutomationRules() {
                 color: "#1e293b"
               }}>
                 {(selectedVisibility === "ACTIVE_HIDDEN" || selectedVisibility === "UNLISTED") && (
-                  <span><strong>Hide from Catalog &amp; Search (Recommended):</strong> Sets <code>seo.hidden = 1</code> to remove product from search index &amp; hides sold-out cards from theme collection grids via Theme App Embed while preserving direct URLs for notify-me alerts.</span>
+                  <span><strong>Hide from Catalog &amp; Search (Recommended):</strong> Sets the product&apos;s status to <strong>Unlisted</strong>, Shopify&apos;s own built-in way to pull a product out of collections, storefront search, predictive search and recommendations while keeping its URL fully reachable — so notify-me alerts still land on a working page. This happens on Shopify&apos;s side, so it works on every theme whether or not the Theme App Embed is on.</span>
                 )}
                 {selectedVisibility === "DRAFT" && (
-                  <span><strong>Set Status to Draft (100% Total Hide):</strong> Sets product status to <strong>Draft</strong> in Shopify Admin. Completely removes product from storefront collections, site search, catalog grids, and direct URLs.</span>
+                  <span><strong>Set Status to Draft (100% Total Hide):</strong> Sets product status to <strong>Draft</strong> in Shopify Admin. Completely removes product from storefront collections, site search, catalog grids, and direct URLs — notify-me alerts cannot work in this mode.</span>
                 )}
                 {selectedVisibility === "TAG_ONLY" && (
-                  <span><strong>Tag Only Mode:</strong> Product stays visible on your store. The app only applies the out-of-stock tag so your theme can show a sold-out badge.</span>
+                  <span><strong>Tag Only Mode:</strong> The app performs no hiding whatsoever — the product stays Active and published. Any sold-out badge comes from the <strong>Auto-Tag Out of Stock</strong> setting below, which has to be ON for a tag to be applied.</span>
                 )}
                 {selectedVisibility === "UNPUBLISH_CHANNEL" && (
-                  <span><strong>Unpublish Channel Mode:</strong> Unpublishes product from the Online Store sales channel while keeping product status intact.</span>
+                  <span><strong>Unpublish Channel Mode:</strong> Unpublishes the product from the Online Store sales channel while leaving its status Active. This is a full hide — the product URL returns 404, so <em>notify-me</em> alerts have no page to render on.</span>
                 )}
               </div>
 
@@ -872,6 +882,41 @@ export default function AutomationRules() {
                   />
                   <span style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px", display: "block" }}>
                     Used by Shopify themes (Prestige, Dawn, Impulse) to display sold-out badges and filter collections.
+                  </span>
+                </div>
+              )}
+
+              <hr style={{ border: "0", borderTop: "1px solid #e2e8f0", margin: "20px 0" }} />
+
+              <div className="form-switch">
+                <div>
+                  <strong style={{ display: "block", fontSize: "14px" }}>Show Low Stock Warning Badge</strong>
+                  <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+                    Storefront urgency badge shown when a variant drops to your low stock threshold
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  name="enableLowStockBadge"
+                  checked={lowStockBadgeEnabled}
+                  onChange={(e) => setLowStockBadgeEnabled(e.target.checked)}
+                  style={{ width: "20px", height: "20px", cursor: "pointer" }}
+                />
+              </div>
+
+              {lowStockBadgeEnabled && (
+                <div className="form-group" style={{ marginTop: "12px" }}>
+                  <label className="form-label" htmlFor="field-lowStockBadgeText">Low Stock Badge Text</label>
+                  <input
+                    id="field-lowStockBadgeText"
+                    type="text"
+                    name="lowStockBadgeText"
+                    defaultValue={settings.lowStockBadgeText}
+                    className="form-input"
+                    placeholder="🔥 Only a few items left in stock!"
+                  />
+                  <span style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px", display: "block" }}>
+                    Moved here from the Theme Editor so it survives theme switches and duplicates.
                   </span>
                 </div>
               )}

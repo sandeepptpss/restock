@@ -140,6 +140,43 @@ assert(
   "ACTIVE_HIDDEN: Product needs restore when seo.hidden = 1"
 );
 
+// The mode now sets Shopify's UNLISTED product status. The seo.hidden assertions
+// above must keep passing so products hidden by an older version are still
+// recognised and restored rather than re-hidden on every scan.
+assert(
+  isHiddenForMode({ status: "UNLISTED", seoHidden: null }, "ACTIVE_HIDDEN") === true,
+  "ACTIVE_HIDDEN: Product is hidden when status = UNLISTED"
+);
+assert(
+  needsVisibilityRestore(
+    { status: "UNLISTED", seoHidden: null, tags: ["out-of-stock"] },
+    "ACTIVE_HIDDEN",
+    { outOfStockTag: "out-of-stock" }
+  ) === true,
+  "ACTIVE_HIDDEN: Product needs restore when status = UNLISTED and carries the app tag"
+);
+// A merchant's own unlisted product must not be published just because it restocked.
+assert(
+  needsVisibilityRestore(
+    { status: "UNLISTED", seoHidden: null, tags: ["seasonal"] },
+    "ACTIVE_HIDDEN",
+    { outOfStockTag: "out-of-stock" }
+  ) === false,
+  "ACTIVE_HIDDEN: Merchant-unlisted product without the app tag is left alone"
+);
+assert(
+  needsVisibilityRestore(
+    { status: "UNLISTED", seoHidden: null, tags: [] },
+    "ACTIVE_HIDDEN",
+    { outOfStockTag: "out-of-stock", enableAutoTag: false }
+  ) === true,
+  "ACTIVE_HIDDEN: With auto-tagging off, UNLISTED still restores (no tag to check)"
+);
+assert(
+  isHiddenForMode({ status: "ACTIVE", seoHidden: null }, "ACTIVE_HIDDEN") === false,
+  "ACTIVE_HIDDEN: Restored product (ACTIVE, no seo.hidden) is not hidden"
+);
+
 // Mode B: Set Status to Draft (Completely Hide Product) [DRAFT]
 assert(
   isHiddenForMode({ status: "DRAFT", seoHidden: null }, "DRAFT") === true,
@@ -176,6 +213,26 @@ assert(
 assert(
   needsVisibilityRestore({ status: "ACTIVE" }, "UNPUBLISH_CHANNEL") === true,
   "UNPUBLISH_CHANNEL Mode: Always triggers re-publish action on restock"
+);
+
+// This mode leaves no trace on the product, so the caller has to look the
+// publication state up. "Not looked up" must read as hidden — reading it as visible
+// re-unpublished and re-logged every tagged product on every single scan.
+assert(
+  isHiddenForMode({ status: "ACTIVE", publishedOnOnlineStore: false }, "UNPUBLISH_CHANNEL") === true,
+  "UNPUBLISH_CHANNEL: Product is hidden when unpublished from Online Store"
+);
+assert(
+  isHiddenForMode({ status: "ACTIVE", publishedOnOnlineStore: true }, "UNPUBLISH_CHANNEL") === false,
+  "UNPUBLISH_CHANNEL: Product is NOT hidden while still published to Online Store"
+);
+assert(
+  isHiddenForMode({ status: "ACTIVE" }, "UNPUBLISH_CHANNEL") === true,
+  "UNPUBLISH_CHANNEL: Unknown publication state counts as hidden (no re-unpublish loop)"
+);
+assert(
+  needsVisibilityRestore({ status: "ACTIVE", publishedOnOnlineStore: true }, "UNPUBLISH_CHANNEL") === false,
+  "UNPUBLISH_CHANNEL: No re-publish needed when already published to Online Store"
 );
 
 // -------------------------------------------------------------

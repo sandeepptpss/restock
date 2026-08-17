@@ -72,6 +72,11 @@ const inventorySettingsSchema = new Schema(
     enableAutoTag: { type: Boolean, default: true },
     outOfStockTag: { type: String, default: "out-of-stock" },
     lowStockTag: { type: String, default: "low-stock" },
+    // Storefront badge copy used to live in the theme app embed's own settings.
+    // It is stored here so the dashboard stays the only place a merchant configures
+    // the app, and so the value survives a theme switch or duplicate.
+    enableLowStockBadge: { type: Boolean, default: true },
+    lowStockBadgeText: { type: String, default: "🔥 Only a few items left in stock!" },
     enableAutoPublish: { type: Boolean, default: true },
     enableCollectionAction: { type: Boolean, default: false },
     outOfStockCollectionId: { type: String, default: "" },
@@ -181,10 +186,16 @@ automationLogSchema.index({ shop: 1, productId: 1, variantId: 1, createdAt: -1 }
 const subscriptionSchema = new Schema(
   {
     shop: { type: String, required: true, unique: true },
-    plan: { type: String, default: "PRO" },
+    // FREE, never a paid tier: a record created without an explicit plan is a shop
+    // whose subscription could not be established, and it must not be handed paid
+    // features. This used to default to PRO.
+    plan: { type: String, default: "FREE" },
     status: { type: String, default: "ACTIVE" },
     startedAt: { type: Date, default: Date.now },
     cancelledAt: { type: Date, default: null },
+    // Set once a paid subscription is confirmed, so the 7-day trial is granted per
+    // shop rather than per subscription — otherwise cycling plans renews it forever.
+    trialUsed: { type: Boolean, default: false },
   },
   { timestamps: { createdAt: true, updatedAt: false }, collection: "subscriptions" }
 );

@@ -12,6 +12,8 @@ import {
   createSupportTicket,
   getSupportTickets,
   updateSupportTicketStatus,
+  syncStorefrontConfig,
+  checkThemeAppEmbedEnabled,
 } from "../models/inventory.server";
 import { getPlan } from "../utils/planLimits";
 
@@ -27,6 +29,7 @@ export const loader = async ({ request }) => {
 
   const settings = await getInventorySettings(session.shop);
   const supportTickets = await getSupportTickets(session.shop, 50);
+  const embedEnabled = await checkThemeAppEmbedEnabled(admin);
   const initialTab = url.searchParams.get("tab") || "general";
 
   return {
@@ -35,12 +38,13 @@ export const loader = async ({ request }) => {
     subscription,
     plan: getPlan(subscription?.plan),
     supportTickets,
+    embedEnabled,
     initialTab,
   };
 };
 
 export const action = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent");
 
@@ -128,7 +132,7 @@ export const action = async ({ request }) => {
     outOfStockTag: formData.get("outOfStockTag"),
     leadTimeDays: formData.get("leadTimeDays"),
     targetStockDays: formData.get("targetStockDays"),
-    ...(features.emailAlerts ? {
+    ...(features.emailAlerts && formData.has("enableEmailAlerts") ? {
       enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
       alertEmail: formData.get("alertEmail"),
       notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
@@ -136,12 +140,16 @@ export const action = async ({ request }) => {
     } : {}),
   });
 
+  // The low stock threshold and out-of-stock tag saved here are part of what the
+  // theme app embed reads, so the storefront's copy has to follow the save.
+  await syncStorefrontConfig(admin, session.shop);
+
   return { success: true, settings: updated };
 };
 
 
 export default function Settings() {
-  const { shop, settings, plan, supportTickets: initialTickets, initialTab } = useLoaderData();
+  const { shop, settings, plan, supportTickets: initialTickets, embedEnabled, initialTab } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -337,9 +345,27 @@ export default function Settings() {
                 Open Theme Editor
               </a>
             </div>
-            <div style={{ marginTop: "16px", background: "#ffffff", padding: "12px 16px", borderRadius: "8px", border: "1px solid #dbeafe" }}>
+            {/* The real state of the embed in the live theme, not a fixed string.
+                This used to always render a green "App Embed Supported", so a shop
+                whose embed was switched off — which pauses automation entirely —
+                was told everything was fine. */}
+            <div style={{
+              marginTop: "16px",
+              background: "#ffffff",
+              padding: "12px 16px",
+              borderRadius: "8px",
+              border: `1px solid ${embedEnabled ? "#dbeafe" : "#fde68a"}`,
+            }}>
               <div style={{ fontSize: "12px", color: "#1e3a8a", fontWeight: "600" }}>
-                Status: <span style={{ color: "#16a34a" }}>App Embed Supported</span> — Enable &quot;Stock Control Helper Embed&quot; in Theme App Embeds menu.
+                {embedEnabled ? (
+                  <>
+                    Status: <span style={{ color: "#16a34a" }}>Enabled</span> — &quot;Stock Control Embed&quot; is active on your live theme. There are no settings to configure inside it.
+                  </>
+                ) : (
+                  <>
+                    Status: <span style={{ color: "#b45309" }}>Not enabled</span> — turn on &quot;Stock Control Embed&quot; under Theme App Embeds. Automated hiding &amp; tagging stay paused until you do.
+                  </>
+                )}
               </div>
             </div>
           </div>

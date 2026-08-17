@@ -72,9 +72,11 @@ async function graphqlWithRetry(admin, query, options = {}, { attempts = 3 } = {
 const DEFAULT_SETTINGS = (shop) => ({
   shop,
   defaultLowStockLimit: 5,
-  // UNLISTED keeps the product out of collections, storefront search, predictive
-  // search, recommendations and the sitemap while leaving its URL reachable, so
-  // the "Notify me when back in stock" block still has a page to render on.
+  // ACTIVE_HIDDEN sets Shopify's UNLISTED product status, which keeps the product
+  // out of collections, storefront search, predictive search, recommendations and
+  // the sitemap while leaving its URL reachable, so the "Notify me when back in
+  // stock" block still has a page to render on. (ACTIVE_HIDDEN and the legacy
+  // UNLISTED setting value are the same mode; both are accepted.)
   visibilityMode: "ACTIVE_HIDDEN",
   variantStrategy: "HIDE_ALL_OOS",
   locationStrategy: "ALL_LOCATIONS",
@@ -86,6 +88,8 @@ const DEFAULT_SETTINGS = (shop) => ({
   enableAutoTag: true,
   outOfStockTag: "out-of-stock",
   lowStockTag: "low-stock",
+  enableLowStockBadge: true,
+  lowStockBadgeText: "🔥 Only a few items left in stock!",
   enableAutoPublish: true,
   enableCollectionAction: false,
   outOfStockCollectionId: "",
@@ -173,6 +177,8 @@ export async function updateInventorySettings(shop, data) {
     enableAutoTag: data.enableAutoTag != null ? Boolean(data.enableAutoTag) : existing.enableAutoTag,
     outOfStockTag: data.outOfStockTag || existing.outOfStockTag || "out-of-stock",
     lowStockTag: data.lowStockTag || existing.lowStockTag || "low-stock",
+    enableLowStockBadge: data.enableLowStockBadge != null ? Boolean(data.enableLowStockBadge) : (existing.enableLowStockBadge ?? true),
+    lowStockBadgeText: data.lowStockBadgeText != null ? data.lowStockBadgeText : (existing.lowStockBadgeText || "🔥 Only a few items left in stock!"),
     enableAutoPublish: data.enableAutoPublish != null ? Boolean(data.enableAutoPublish) : existing.enableAutoPublish,
     enableCollectionAction: data.enableCollectionAction != null ? Boolean(data.enableCollectionAction) : existing.enableCollectionAction,
     outOfStockCollectionId: data.outOfStockCollectionId || existing.outOfStockCollectionId || "",
@@ -699,9 +705,9 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
             handle
             status
             tags
-            # The trace left by the UNLISTED/ACTIVE_HIDDEN visibility modes, which
-            # keep the product ACTIVE. Without it a restock cannot tell whether the
-            # app hid the product from the catalogue.
+            # The trace older versions of the ACTIVE_HIDDEN mode left behind, before
+            # it switched to Shopify's UNLISTED product status. Still read so a
+            # restock can recognise — and clear — a product hidden the old way.
             seoHidden: metafield(namespace: "seo", key: "hidden") {
               value
             }
@@ -947,10 +953,197 @@ export async function checkThemeAppEmbedEnabled(admin) {
 }
 
 /**
+ * App-owned shop metafield the theme app embed reads its configuration from.
+ *
+ * The embed used to carry its own theme-editor settings, which meant a merchant
+ * could switch the app on in this dashboard and still see nothing on the storefront
+ * because a duplicated theme had reset the block's checkbox — and nothing in the
+ * dashboard could tell. The dashboard is now the single source of truth: the same
+ * settings the automation engine acts on are mirrored into this metafield, which the
+ * embed reads in Liquid as `app.metafields.stockshield.storefront_config`.
+ *
+ * `$app:` marks the namespace as app-owned, which is what makes it reachable from
+ * the embed without a merchant-visible definition.
+ */
+const STOREFRONT_CONFIG_NAMESPACE = "$app:stockshield";
+const STOREFRONT_CONFIG_KEY = "storefront_config";
+
+// Client-side card hiding only has work to do when the product stays active but is
+// pulled out of the catalogue. DRAFT and UNPUBLISH_CHANNEL already remove the card
+// server-side, and TAG_ONLY deliberately keeps it on display.
+const CATALOG_HIDING_MODES = new Set(["ACTIVE_HIDDEN", "UNLISTED"]);
+
+// Shop GIDs never change, and re-writing an unchanged config on every scan would
+// spend an API call for nothing. These caches are per-process and safe to lose.
+const shopGidCache = new Map();
+const storefrontConfigCache = new Map();
+const storefrontConfigDefinitionReady = new Set();
+
+async function getShopGid(admin, shop) {
+  const cached = shopGidCache.get(shop);
+  if (cached) return cached;
+
+  const json = await graphqlWithRetry(admin, `#graphql
+    query shopIdForStorefrontConfig {
+      shop { id }
+    }
+  `);
+  const id = json?.data?.shop?.id || null;
+  if (id) shopGidCache.set(shop, id);
+  return id;
+}
+
+/**
+ * Make sure the metafield has a definition granting storefront read access.
+ *
+ * A bare `metafieldsSet` writes the value, but without a definition marked
+ * `storefront: PUBLIC_READ` the value is not guaranteed to be resolvable from
+ * Liquid — so the embed would silently fall back to its defaults. Creating the
+ * definition is idempotent: a shop that already has it comes back TAKEN, which is
+ * the success case on every call after the first.
+ */
+async function ensureStorefrontConfigDefinition(admin, shop) {
+  if (storefrontConfigDefinitionReady.has(shop)) return;
+
+  const json = await graphqlWithRetry(
+    admin,
+    `#graphql
+      mutation createStorefrontConfigDefinition($definition: MetafieldDefinitionInput!) {
+        metafieldDefinitionCreate(definition: $definition) {
+          createdDefinition { id }
+          userErrors { field message code }
+        }
+      }
+    `,
+    {
+      variables: {
+        definition: {
+          name: "Stock Control storefront config",
+          description:
+            "Storefront rules the Stock Control theme app embed reads. Managed by the app dashboard.",
+          namespace: STOREFRONT_CONFIG_NAMESPACE,
+          key: STOREFRONT_CONFIG_KEY,
+          type: "json",
+          ownerType: "SHOP",
+          access: { admin: "MERCHANT_READ", storefront: "PUBLIC_READ" },
+        },
+      },
+    }
+  );
+
+  const userErrors = json?.data?.metafieldDefinitionCreate?.userErrors || [];
+  const blocking = userErrors.filter((e) => e.code !== "TAKEN");
+  if (blocking.length) {
+    console.warn(
+      "[syncStorefrontConfig] Could not define embed config metafield:",
+      blocking.map((e) => e.message).join("; ")
+    );
+    return;
+  }
+
+  storefrontConfigDefinitionReady.add(shop);
+}
+
+/**
+ * The subset of a shop's settings the storefront needs to know about.
+ *
+ * Built from plan-clamped settings, so a shop that drops to a tier without
+ * auto-hide stops hiding cards on the storefront too rather than keeping the
+ * behaviour it no longer pays for.
+ */
+export function buildStorefrontConfig(settings = {}) {
+  return {
+    v: 1,
+    hideSoldOutCards:
+      settings.enableAutoHide !== false && CATALOG_HIDING_MODES.has(settings.visibilityMode),
+    lowStockBadge: settings.enableLowStockBadge !== false,
+    lowStockText: settings.lowStockBadgeText || "🔥 Only a few items left in stock!",
+    lowStockLimit: Number(settings.defaultLowStockLimit) || 5,
+    outOfStockTag: settings.outOfStockTag || "out-of-stock",
+    lowStockTag: settings.lowStockTag || "low-stock",
+    visibilityMode: settings.visibilityMode || "ACTIVE_HIDDEN",
+  };
+}
+
+/**
+ * Mirror the dashboard's settings into the metafield the theme app embed reads.
+ *
+ * Called after every settings save and from the automation scan, which is what
+ * backfills shops that were configured before the embed stopped carrying its own
+ * settings. Failures are logged and swallowed: a metafield that could not be
+ * written leaves the embed on its built-in defaults, which is the behaviour those
+ * shops already had.
+ */
+export async function syncStorefrontConfig(admin, shop, settings = null) {
+  if (!admin || !shop) return null;
+
+  const resolved = settings || (await getEffectiveSettings(shop));
+  const config = buildStorefrontConfig(resolved);
+  const serialized = JSON.stringify(config);
+
+  if (storefrontConfigCache.get(shop) === serialized) return config;
+
+  try {
+    const ownerId = await getShopGid(admin, shop);
+    if (!ownerId) return null;
+
+    await ensureStorefrontConfigDefinition(admin, shop);
+
+    const json = await graphqlWithRetry(
+      admin,
+      `#graphql
+        mutation setStorefrontConfig($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id }
+            userErrors { field message }
+          }
+        }
+      `,
+      {
+        variables: {
+          metafields: [
+            {
+              ownerId,
+              namespace: STOREFRONT_CONFIG_NAMESPACE,
+              key: STOREFRONT_CONFIG_KEY,
+              type: "json",
+              value: serialized,
+            },
+          ],
+        },
+      }
+    );
+
+    const errors = collectGraphqlErrors(json, "metafieldsSet");
+    if (errors.length) {
+      console.warn("[syncStorefrontConfig] Could not write embed config:", errors.join("; "));
+      return null;
+    }
+
+    storefrontConfigCache.set(shop, serialized);
+    return config;
+  } catch (err) {
+    console.warn("[syncStorefrontConfig] Error writing embed config:", err.message);
+    return null;
+  }
+}
+
+/**
  * Execute Stockout & Low-Stock Automation Scan with Variant Handling Strategy
  */
 export async function runStockoutAutomationScan(admin, shop) {
-  // 1. First process any pending scheduled restocks due for execution BEFORE fetching catalog
+  // 0. Reconcile the stored plan against Shopify's billing record before anything
+  // reads settings.
+  //
+  // Gating is clamped on read from the stored plan, so a stale plan is a plan the
+  // engine will honour. The route loaders reconcile on page load, but the cron
+  // reconciliation never did — a merchant who cancelled in the Shopify admin and
+  // never reopened the app kept their paid automations running indefinitely. One
+  // cheap query here closes that, and covers a fresh install whose record does not
+  // exist yet.
+  await syncSubscriptionFromShopify(admin, shop);
+
+  // 1. Process any pending scheduled restocks due for execution BEFORE fetching catalog
   await processPendingScheduledRestocks(admin, shop);
 
   // 2. Check if Theme App Embed is enabled in Shopify Theme Editor. If UNCHECKED, pause backend automation!
@@ -958,6 +1151,12 @@ export async function runStockoutAutomationScan(admin, shop) {
 
   // 3. Fetch live inventory data from Shopify AFTER restocks have executed
   const { items, settings, customThresholds, primaryLocationId } = await fetchShopifyInventory(admin, shop);
+
+  // 4. Publish the storefront-facing slice of these settings to the metafield the
+  // theme app embed reads. Doing it here — not only on save — backfills shops that
+  // were configured while the embed still carried its own theme-editor settings.
+  await syncStorefrontConfig(admin, shop, settings);
+
   const logsToCreate = [];
   let taggedCount = 0;
   let hiddenCount = 0;
@@ -1380,9 +1579,11 @@ export async function runStockoutAutomationScan(admin, shop) {
       }
 
       // Reverse the visibility action for the configured mode. DRAFT only needs
-      // restoring when the product is actually drafted and UNLISTED/ACTIVE_HIDDEN
-      // only when the seo.hidden metafield is still set; the channel mode has no
-      // status to inspect, so it is always re-published.
+      // restoring when the product is actually drafted, and ACTIVE_HIDDEN only when
+      // the product is UNLISTED or still carries the legacy seo.hidden metafield.
+      // The channel mode leaves no trace on the product and this path is only
+      // reached on a real restock, so it re-publishes unconditionally — an
+      // idempotent call rather than a query to find out it was not needed.
       const needsRestore = needsVisibilityRestore(
         { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden, tags: firstItem.productTags },
         settings.visibilityMode,
@@ -1436,8 +1637,21 @@ export async function runStockoutAutomationScan(admin, shop) {
     // removed, whose `productTags` snapshot is now stale.
     if (!isProductStockout && !outOfStockTagRemoved && settings.enableAutoHide !== false) {
       const carriesOutOfStockTag = (firstItem.productTags || []).includes(settings.outOfStockTag);
+
+      // UNPUBLISH_CHANNEL is the one mode whose result cannot be read off the
+      // product, so it costs a query to find out. Only spend it on a tagged product
+      // under that mode — every other mode answers from the snapshot for free.
+      const publishedOnOnlineStore =
+        carriesOutOfStockTag && settings.visibilityMode === "UNPUBLISH_CHANNEL"
+          ? await isPublishedOnOnlineStore(admin, shop, productId)
+          : undefined;
+
       const alreadyHidden = isHiddenForMode(
-        { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden },
+        {
+          status: firstItem.productStatus,
+          seoHidden: firstItem.productSeoHidden,
+          publishedOnOnlineStore: publishedOnOnlineStore ?? undefined,
+        },
         settings.visibilityMode
       );
 
@@ -2016,6 +2230,13 @@ function readVisibilityState(product) {
   return {
     status: product.status || product.productStatus || "",
     seoHidden: product.seoHidden !== undefined ? product.seoHidden : product.productSeoHidden,
+    // Tri-state: true published, false unpublished, undefined "not looked up".
+    // Only the UNPUBLISH_CHANNEL mode needs it, so callers on other modes leave it
+    // undefined rather than spend a query proving something irrelevant.
+    publishedOnOnlineStore:
+      product.publishedOnOnlineStore !== undefined
+        ? product.publishedOnOnlineStore
+        : product.productPublishedOnOnlineStore,
     tags: Array.isArray(product.tags)
       ? product.tags
       : Array.isArray(product.productTags)
@@ -2046,7 +2267,7 @@ function isSeoHiddenValue(value) {
  */
 export function needsVisibilityRestore(product, visibilityMode, settings = {}) {
   const mode = visibilityMode || "DRAFT";
-  const { status, seoHidden, tags } = readVisibilityState(product);
+  const { status, seoHidden, publishedOnOnlineStore, tags } = readVisibilityState(product);
   const outOfStockTag = settings?.outOfStockTag || "out-of-stock";
 
   // ARCHIVED products were archived by merchant and must never be auto-restored
@@ -2061,9 +2282,23 @@ export function needsVisibilityRestore(product, visibilityMode, settings = {}) {
 
   if (mode === "TAG_ONLY") return false;
   if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
+    // UNLISTED is the status this mode sets; seo.hidden is the trace older versions
+    // left behind and still has to be cleared. `undefined` means the caller could
+    // not read the metafield, in which case restoring is the safe assumption.
+    //
+    // Unlike seo.hidden, UNLISTED is a status merchants set by hand for deliberately
+    // exclusive or unlisted products. Restocking one of those must not drag it into
+    // the catalogue, so the app's own out-of-stock tag — its record of having done
+    // the hiding — is required, exactly as the DRAFT branch above requires it. With
+    // auto-tagging off there is no such record to check and the mode restores
+    // unconditionally, which is how it behaved before.
+    if (status === "UNLISTED") {
+      if (settings?.enableAutoTag === false) return true;
+      return (tags || []).includes(outOfStockTag);
+    }
     return seoHidden === undefined ? true : isSeoHiddenValue(seoHidden);
   }
-  if (mode === "UNPUBLISH_CHANNEL") return true;
+  if (mode === "UNPUBLISH_CHANNEL") return publishedOnOnlineStore !== true;
 
   return false;
 }
@@ -2078,11 +2313,21 @@ export function needsVisibilityRestore(product, visibilityMode, settings = {}) {
  */
 export function isHiddenForMode(product, visibilityMode) {
   const mode = visibilityMode || "DRAFT";
-  const { status, seoHidden } = readVisibilityState(product);
+  const { status, seoHidden, publishedOnOnlineStore } = readVisibilityState(product);
 
   if (mode === "TAG_ONLY") return false;
-  if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") return isSeoHiddenValue(seoHidden);
+  if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
+    // Either trace counts as hidden: the UNLISTED status this mode sets now, or the
+    // seo.hidden metafield it used to set. Without the second half every product a
+    // previous version hid would be re-hidden on the next scan.
+    return status === "UNLISTED" || isSeoHiddenValue(seoHidden);
+  }
   if (mode === "DRAFT") return status === "DRAFT";
+  // A product's publication state is not visible in its status or metafields, so
+  // the caller has to look it up. Treating "not looked up" as already hidden is
+  // deliberate: this function only gates re-hiding, and guessing "still visible"
+  // meant every tagged product was re-unpublished and re-logged on every scan.
+  if (mode === "UNPUBLISH_CHANNEL") return publishedOnOnlineStore !== true;
   return false;
 }
 
@@ -2171,6 +2416,41 @@ export async function getOnlineStorePublicationId(admin, shop) {
  * status alone, and UNPUBLISH_CHANNEL removes the product from the Online Store
  * publication instead of touching its status.
  */
+/**
+ * Whether a product is published to the Online Store channel.
+ *
+ * Returns `null` when it could not be determined — the caller must treat that as
+ * "unknown", never as "unpublished". Unlike DRAFT and UNLISTED, the UNPUBLISH_CHANNEL
+ * mode leaves no trace on the product itself, so this is the only way to tell
+ * whether that mode's work is already done.
+ */
+export async function isPublishedOnOnlineStore(admin, shop, productId) {
+  const id = ensureGid(productId, "Product");
+  if (!admin || !id) return null;
+
+  const publicationId = await getOnlineStorePublicationId(admin, shop);
+  if (!publicationId) return null;
+
+  try {
+    const json = await graphqlWithRetry(
+      admin,
+      `#graphql
+        query productOnlineStorePublication($id: ID!, $publicationId: ID!) {
+          product(id: $id) {
+            publishedOnPublication(publicationId: $publicationId)
+          }
+        }
+      `,
+      { variables: { id, publicationId } }
+    );
+    const value = json?.data?.product?.publishedOnPublication;
+    return typeof value === "boolean" ? value : null;
+  } catch (err) {
+    console.warn("[isPublishedOnOnlineStore] Could not read publication state:", err.message);
+    return null;
+  }
+}
+
 export async function applyStockoutVisibility(admin, { productId, visibilityMode, shop }) {
   const mode = visibilityMode || "DRAFT";
   const id = ensureGid(productId, "Product");
@@ -2256,56 +2536,41 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
   }
 
   if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
+    // Shopify's own UNLISTED product status (Admin API 2025-10 and later) does
+    // exactly what this mode promises, server-side: the product leaves collections,
+    // storefront search, predictive search and recommendations, while its handle
+    // stays reachable so the notify-me block still has a page to render on.
+    //
+    // This used to write seo.hidden = 1 and keep the product ACTIVE instead, which
+    // only covered the sitemap and search — collection grids still listed the
+    // product, and emptying them was left to the theme app embed hiding cards with
+    // CSS. That fallback stays in the embed for shops still carrying the old
+    // metafield, but it is no longer what makes this mode work.
     try {
       const res = await admin.graphql(
         `#graphql
-          mutation setUnlistedSeoMetafield($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id key value }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: id,
-                namespace: "seo",
-                key: "hidden",
-                value: "1",
-                type: "number_integer",
-              },
-            ],
-          },
-        }
-      );
-      const json = await res.json();
-      const errs = collectGraphqlErrors(json, "metafieldsSet");
-      if (errs.length > 0) errors.push(...errs);
-
-      // Ensure product status remains ACTIVE so direct URLs are 100% accessible
-      await admin.graphql(
-        `#graphql
-          mutation productUpdateActive($input: ProductInput!) {
+          mutation productUpdateUnlisted($input: ProductInput!) {
             productUpdate(input: $input) {
               product { id status }
               userErrors { field message }
             }
           }
         `,
-        { variables: { input: { id, status: "ACTIVE" } } }
+        { variables: { input: { id, status: "UNLISTED" } } }
       );
+      const json = await res.json();
+      const errs = collectGraphqlErrors(json, "productUpdate");
+      if (errs.length > 0) errors.push(...errs);
 
       return {
         mode,
-        action: "Set to Unlisted Active (Product ACTIVE, Hidden from Storefront & Search, Direct URL Accessible)",
+        action: "Set status to UNLISTED (hidden from collections, search & recommendations, direct URL still works)",
         changed: errors.length === 0,
         errors,
       };
     } catch (err) {
       errors.push(err.message);
-      return { mode, action: "Set to Unlisted Active", changed: false, errors };
+      return { mode, action: "Set status to UNLISTED", changed: false, errors };
     }
   }
 
@@ -2431,6 +2696,10 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
   }
 
   if (mode === "UNLISTED" || mode === "ACTIVE_HIDDEN") {
+    // Both traces are cleared, not just the current one: the status goes back to
+    // ACTIVE, and seo.hidden is reset to 0 so a product hidden by an older version
+    // of the app — which used that metafield instead of the UNLISTED status — is
+    // fully restored rather than left de-indexed forever.
     try {
       const res = await admin.graphql(
         `#graphql
@@ -2473,13 +2742,13 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
 
       return {
         mode,
-        action: "Restored to Storefront & Search (Product ACTIVE, seo.hidden = 0)",
+        action: "Restored to collections & search (status ACTIVE, seo.hidden = 0)",
         changed: errors.length === 0,
         errors,
       };
     } catch (err) {
       errors.push(err.message);
-      return { mode, action: "Restore Unlisted Active", changed: false, errors };
+      return { mode, action: "Restore to ACTIVE from UNLISTED", changed: false, errors };
     }
   }
 
@@ -3145,14 +3414,20 @@ export async function processPendingScheduledRestocks(admin, shop, { limit = 25 
  * Get shop active subscription plan
  */
 export async function getShopSubscription(shop) {
-  if (!isDbConfigured()) return { plan: "GROWTH", status: "ACTIVE" };
+  // Every fallback here is FREE, matching normalizePlan: a shop with no record, an
+  // unconfigured database and a failed query are all "subscription unknown", and
+  // paid automation must not run on a guess. These fallbacks used to return GROWTH,
+  // which handed auto-hide, auto-publish, restock delays, auto-fill and email
+  // alerts to every fresh install — and, because the cron scan never reconciles
+  // against Shopify, kept giving them to shops that had cancelled.
+  if (!isDbConfigured()) return { shop, plan: "FREE", status: "ACTIVE" };
   try {
     await tryConnectDB();
     const sub = await Subscription.findOne({ shop }).lean();
-    return sub ? plain(sub) : { shop, plan: "GROWTH", status: "ACTIVE" };
+    return sub ? plain(sub) : { shop, plan: "FREE", status: "ACTIVE" };
   } catch (err) {
     console.warn("Error fetching subscription:", err.message);
-    return { shop, plan: "GROWTH", status: "ACTIVE" };
+    return { shop, plan: "FREE", status: "ACTIVE" };
   }
 }
 
@@ -3297,7 +3572,13 @@ export async function syncSubscriptionFromShopify(admin, shop) {
     return { synced: true, changed: false, subscription: stored };
   }
 
-  const updated = await updateShopSubscription(shop, shopifyPlan);
+  // A confirmed paid subscription consumes the shop's one free trial, wherever the
+  // confirmation arrives from — the billing return URL, a later page load, or the
+  // cron reconciliation. Recorded here so it cannot be re-granted by downgrading to
+  // FREE and upgrading again.
+  const updated = await updateShopSubscription(shop, shopifyPlan, {
+    trialUsed: shopifyPlan !== "FREE" ? true : undefined,
+  });
   console.log(`[billing] ${shop}: stored plan ${stored?.plan} → ${shopifyPlan} (from Shopify)`);
   await createAutomationLog({
     shop,
@@ -3314,12 +3595,20 @@ export async function syncSubscriptionFromShopify(admin, shop) {
 /**
  * Update shop subscription plan
  */
-export async function updateShopSubscription(shop, plan) {
+export async function updateShopSubscription(shop, plan, { trialUsed } = {}) {
   if (!isDbConfigured()) return { shop, plan, status: "ACTIVE" };
   await tryConnectDB();
   const updated = await Subscription.findOneAndUpdate(
     { shop },
-    { $set: { plan, status: "ACTIVE", startedAt: new Date() } },
+    {
+      $set: {
+        plan,
+        status: "ACTIVE",
+        startedAt: new Date(),
+        // Only ever set to true. A downgrade must not hand back an unused trial.
+        ...(trialUsed ? { trialUsed: true } : {}),
+      },
+    },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
   ).lean();
   return plain(updated);

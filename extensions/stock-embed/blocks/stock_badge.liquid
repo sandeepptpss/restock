@@ -1,16 +1,72 @@
 {% comment %}
   Smart Stock Control Theme App Embed Block
-  Injects real-time stock badges and auto-hides sold-out products from collection grids
+
+  This block has no settings of its own on purpose. Every rule it applies is
+  configured in the stockshield app dashboard and delivered through the app-owned
+  shop metafield below, so the merchant has one place to change things and the
+  dashboard can always report the storefront's real state. Theme-editor settings
+  are per-theme: duplicating or switching a theme silently reset them, which made
+  the dashboard's "active" badge a lie.
+
+  Turning this embed off in the theme editor remains the merchant's kill switch.
 {% endcomment %}
-{% if product %}
-  <script>
-    window.StockControlEmbed = {
+
+{%- liquid
+  # `app.metafields` is the documented path for an app reading its own metafields
+  # from its own theme app extension. The bracketed shop lookup is a fallback for
+  # contexts where the app object does not resolve the reserved namespace.
+  assign ss_config = app.metafields.stockshield.storefront_config.value
+  unless ss_config
+    assign ss_config = shop.metafields['$app:stockshield']['storefront_config'].value
+  endunless
+
+  # Defaults match the app's own defaults, so a shop whose config has not been
+  # written yet behaves exactly as it did before the settings moved.
+  assign ss_hide_cards = true
+  assign ss_low_stock_badge = true
+  assign ss_low_stock_text = '🔥 Only a few items left in stock!'
+  assign ss_low_stock_limit = 5
+  assign ss_out_of_stock_tag = 'out-of-stock'
+  assign ss_low_stock_tag = 'low-stock'
+
+  if ss_config
+    if ss_config.hideSoldOutCards == false
+      assign ss_hide_cards = false
+    endif
+    if ss_config.lowStockBadge == false
+      assign ss_low_stock_badge = false
+    endif
+    if ss_config.lowStockText != blank
+      assign ss_low_stock_text = ss_config.lowStockText
+    endif
+    if ss_config.lowStockLimit != blank
+      assign ss_low_stock_limit = ss_config.lowStockLimit
+    endif
+    if ss_config.outOfStockTag != blank
+      assign ss_out_of_stock_tag = ss_config.outOfStockTag
+    endif
+    if ss_config.lowStockTag != blank
+      assign ss_low_stock_tag = ss_config.lowStockTag
+    endif
+  endif
+-%}
+
+<script>
+  window.StockControlEmbed = {
+    hideSoldOutCards: {{ ss_hide_cards | json }},
+    lowStockBadge: {{ ss_low_stock_badge | json }},
+    lowStockText: {{ ss_low_stock_text | json }},
+    lowStockLimit: {{ ss_low_stock_limit | json }},
+    outOfStockTag: {{ ss_out_of_stock_tag | json }},
+    lowStockTag: {{ ss_low_stock_tag | json }},
+    {% if product %}
       productId: {{ product.id | json }},
       variants: {{ product.variants | json }},
-      outOfStockTag: "out-of-stock",
-      lowStockTag: "low-stock"
-    };
-  </script>
+    {% endif %}
+  };
+</script>
+
+{% if product %}
   <style>
     .stock-badge-container {
       display: inline-flex;
@@ -37,7 +93,8 @@
 
 <script>
   (function() {
-    {% if block.settings.hide_sold_out_collections == true or block.settings.hide_sold_out_collections == nil %}
+    if (!window.StockControlEmbed || window.StockControlEmbed.hideSoldOutCards !== true) return;
+
     function autoHideSoldOutCollectionCards() {
       // Do not hide main product display on single product pages
       var path = window.location.pathname || '';
@@ -94,7 +151,6 @@
       });
       observer.observe(document.body, { childList: true, subtree: true });
     } catch(e) {}
-    {% endif %}
   })();
 </script>
 
@@ -104,22 +160,8 @@
   "target": "head",
   "settings": [
     {
-      "type": "checkbox",
-      "id": "enable_low_stock_badge",
-      "label": "Show Low Stock Warning Badge",
-      "default": true
-    },
-    {
-      "type": "text",
-      "id": "low_stock_text",
-      "label": "Low Stock Badge Text",
-      "default": "🔥 Only a few items left in stock!"
-    },
-    {
-      "type": "checkbox",
-      "id": "hide_sold_out_collections",
-      "label": "Auto-Hide Sold Out Items from Collection & Search Grids",
-      "default": true
+      "type": "paragraph",
+      "content": "Nothing to configure here. Turning this embed on is the only step — every rule (auto-hide, visibility mode, tags, restock timers, low-stock badge) is managed in the stockshield app dashboard. Use the toggle above to switch the app off for this theme."
     }
   ]
 }
