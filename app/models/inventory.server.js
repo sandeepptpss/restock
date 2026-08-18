@@ -104,6 +104,16 @@ const DEFAULT_SETTINGS = (shop) => ({
   leadTimeDays: 14,
   targetStockDays: 30,
   reviewPromptDismissed: false,
+  enableSmsAlerts: false,
+  smsProvider: "TWILIO",
+  twilioAccountSid: "",
+  twilioAuthToken: "",
+  twilioFromNumber: "",
+  klaviyoApiKey: "",
+  klaviyoSmsListId: "",
+  klaviyoMetricName: "StockShield Back in Stock",
+  smsDefaultCountryCode: "+1",
+  smsRestockTemplate: "{{product}} is back in stock at {{shop}}. Get it here: {{url}}",
 });
 
 /**
@@ -156,6 +166,24 @@ export async function getEffectiveSettings(shop) {
   return applyPlanToSettings(settings, subscription?.plan);
 }
 
+/** Only the two providers this app can actually send through. */
+function normalizeSmsProvider(value) {
+  return String(value || "").toUpperCase() === "KLAVIYO" ? "KLAVIYO" : "TWILIO";
+}
+
+/**
+ * A submitted secret, or the one already stored when the field came back blank.
+ *
+ * The settings page renders API credentials masked and never receives the real
+ * value, so a blank submission is the normal case for a merchant who edited
+ * something else on the same form. Treating it as "set to empty" silently
+ * disconnected their SMS provider on every unrelated save.
+ */
+function emptyMeansUnchanged(submitted, existingValue) {
+  const trimmed = submitted != null ? String(submitted).trim() : "";
+  return trimmed || existingValue || "";
+}
+
 /**
  * Update inventory settings for a shop
  */
@@ -193,6 +221,22 @@ export async function updateInventorySettings(shop, data) {
     leadTimeDays: data.leadTimeDays != null ? (Number(data.leadTimeDays) || 14) : existing.leadTimeDays,
     targetStockDays: data.targetStockDays != null ? (Number(data.targetStockDays) || 30) : existing.targetStockDays,
     reviewPromptDismissed: data.reviewPromptDismissed != null ? Boolean(data.reviewPromptDismissed) : (existing.reviewPromptDismissed ?? false),
+    enableSmsAlerts: data.enableSmsAlerts != null ? Boolean(data.enableSmsAlerts) : (existing.enableSmsAlerts ?? false),
+    smsProvider: normalizeSmsProvider(data.smsProvider || existing.smsProvider),
+    twilioAccountSid: data.twilioAccountSid != null ? String(data.twilioAccountSid).trim() : (existing.twilioAccountSid || ""),
+    // Secrets follow the "blank means unchanged" rule the settings form relies on:
+    // the stored token is never sent to the browser, so an empty field is a field
+    // that was rendered masked and left alone — not an instruction to erase the
+    // credential. Clearing one is done by switching the feature off.
+    twilioAuthToken: emptyMeansUnchanged(data.twilioAuthToken, existing.twilioAuthToken),
+    twilioFromNumber: data.twilioFromNumber != null ? String(data.twilioFromNumber).trim() : (existing.twilioFromNumber || ""),
+    klaviyoApiKey: emptyMeansUnchanged(data.klaviyoApiKey, existing.klaviyoApiKey),
+    klaviyoSmsListId: data.klaviyoSmsListId != null ? String(data.klaviyoSmsListId).trim() : (existing.klaviyoSmsListId || ""),
+    klaviyoMetricName: data.klaviyoMetricName ? String(data.klaviyoMetricName).trim() : (existing.klaviyoMetricName || "StockShield Back in Stock"),
+    smsDefaultCountryCode: data.smsDefaultCountryCode ? String(data.smsDefaultCountryCode).trim() : (existing.smsDefaultCountryCode || "+1"),
+    smsRestockTemplate: data.smsRestockTemplate != null && String(data.smsRestockTemplate).trim()
+      ? String(data.smsRestockTemplate).trim()
+      : (existing.smsRestockTemplate || "{{product}} is back in stock at {{shop}}. Get it here: {{url}}"),
   };
 
   const updated = await InventorySettings.findOneAndUpdate(
@@ -1081,6 +1125,13 @@ export function buildStorefrontConfig(settings = {}) {
     // theme, not in this app. Publishing the entitlement here is what lets the
     // block take itself off the storefront when the plan no longer covers it.
     restockWidget: Boolean(settings.planFeatures?.backInStockWidget),
+    // Whether the storefront form should collect a phone number as well.
+    //
+    // Both halves have to hold: the plan has to include SMS *and* the merchant has
+    // to have turned it on. Published here for the same reason as restockWidget —
+    // the theme block cannot see the plan, so an Enterprise store that downgrades
+    // stops asking customers for a number they would never be messaged on.
+    smsOptIn: Boolean(settings.planFeatures?.smsAlerts && settings.enableSmsAlerts),
   };
 }
 
@@ -3504,6 +3555,22 @@ function planFromSubscription(sub) {
   );
 }
 
+/**
+ * When a Shopify subscription's free trial ends.
+ *
+ * Derived from Shopify's own `createdAt` + the `trialDays` Shopify actually
+ * applied, rather than from the moment the merchant clicked Upgrade: those differ
+ * whenever approval was delayed, and the merchant is billed by Shopify's clock. A
+ * subscription created with no trial returns null, which is what the UI reads as
+ * "no trial running".
+ */
+function trialWindowFor(sub) {
+  const trialDays = Number(sub?.trialDays) || 0;
+  const startedMs = subscriptionCreatedMs(sub);
+  if (trialDays <= 0 || !startedMs) return { trialDays, trialEndsAt: null };
+  return { trialDays, trialEndsAt: new Date(startedMs + trialDays * 86400000) };
+}
+
 /** A subscription's creation time in ms, with anything unparseable sorting oldest. */
 function subscriptionCreatedMs(sub) {
   const ms = new Date(sub?.createdAt || 0).getTime();
@@ -3524,7 +3591,7 @@ function subscriptionCreatedMs(sub) {
  * "unknown" and leave the stored plan alone rather than downgrading a paying
  * merchant on a transient API error.
  */
-export async function fetchActivePlanFromShopify(admin) {
+export async function fetchActiveSubscriptionFromShopify(admin) {
   if (!admin) return null;
   try {
     const res = await admin.graphql(
@@ -3536,6 +3603,7 @@ export async function fetchActivePlanFromShopify(admin) {
               name
               status
               createdAt
+              trialDays
               lineItems {
                 plan {
                   pricingDetails {
@@ -3559,7 +3627,7 @@ export async function fetchActivePlanFromShopify(admin) {
     const active = (json.data?.currentAppInstallation?.activeSubscriptions || []).filter(
       (sub) => sub.status === "ACTIVE"
     );
-    if (active.length === 0) return "FREE";
+    if (active.length === 0) return { plan: "FREE", trialDays: 0, trialEndsAt: null };
 
     // The plan is the subscription the merchant most recently agreed to.
     //
@@ -3595,11 +3663,22 @@ export async function fetchActivePlanFromShopify(admin) {
       );
     }
 
-    return plan;
+    return { plan, ...trialWindowFor(current) };
   } catch (err) {
     console.error("[billing] Could not read active subscriptions:", err.message);
     return null;
   }
+}
+
+/**
+ * The plan Shopify says this shop is paying for, as a bare plan name.
+ *
+ * Kept as the narrow form for callers that only gate on the tier; anything that
+ * needs the trial reads fetchActiveSubscriptionFromShopify directly.
+ */
+export async function fetchActivePlanFromShopify(admin) {
+  const resolved = await fetchActiveSubscriptionFromShopify(admin);
+  return resolved ? resolved.plan : null;
 }
 
 /**
@@ -3662,20 +3741,48 @@ export async function cancelActiveSubscriptions(admin) {
  * merchant having to do anything.
  */
 export async function syncSubscriptionFromShopify(admin, shop) {
-  const shopifyPlan = await fetchActivePlanFromShopify(admin);
-  if (!shopifyPlan) return { synced: false, subscription: await getShopSubscription(shop) };
+  const shopifySub = await fetchActiveSubscriptionFromShopify(admin);
+  if (!shopifySub) return { synced: false, subscription: await getShopSubscription(shop) };
 
+  const shopifyPlan = shopifySub.plan;
   const stored = await getShopSubscription(shop);
+
+  // The trial window Shopify reports for the subscription the shop is on now. A
+  // paid plan with no trial (Enterprise, or a shop that had already used theirs)
+  // reports null, which clears any window left over from an earlier trial.
+  const trialEndsAt = shopifyPlan === "FREE" ? null : shopifySub.trialEndsAt || null;
+  const trialPlan = trialEndsAt ? shopifyPlan : null;
+  const storedTrialMs = stored?.trialEndsAt ? new Date(stored.trialEndsAt).getTime() : null;
+  const trialChanged =
+    (trialEndsAt ? trialEndsAt.getTime() : null) !== (Number.isFinite(storedTrialMs) ? storedTrialMs : null) ||
+    (stored?.trialPlan || null) !== trialPlan;
+
   if (normalizePlan(stored?.plan) === shopifyPlan) {
-    return { synced: true, changed: false, subscription: stored };
+    // Same tier, but the trial window may still be news — this is the path every
+    // page load after the first takes, so it is the only place a trial that Shopify
+    // granted (or that has since been cancelled) gets recorded at all.
+    if (!trialChanged) return { synced: true, changed: false, subscription: stored };
+
+    const refreshed = await updateShopSubscription(shop, shopifyPlan, {
+      trialUsed: trialEndsAt ? true : undefined,
+      trialEndsAt,
+      trialPlan,
+    });
+    return { synced: true, changed: false, subscription: refreshed };
   }
 
-  // A confirmed paid subscription consumes the shop's one free trial, wherever the
-  // confirmation arrives from — the billing return URL, a later page load, or the
-  // cron reconciliation. Recorded here so it cannot be re-granted by downgrading to
-  // FREE and upgrading again.
+  // The shop's one free trial is consumed when Shopify actually granted trial days,
+  // wherever the confirmation arrives from — the billing return URL, a later page
+  // load, or the cron reconciliation. Recorded so it cannot be re-granted by
+  // downgrading to FREE and upgrading again.
+  //
+  // Keyed on the trial having been *granted*, not merely on the plan being paid:
+  // Enterprise is sold without a trial, and marking the flag on an Enterprise
+  // purchase would quietly burn a free week the merchant was never offered.
   const updated = await updateShopSubscription(shop, shopifyPlan, {
-    trialUsed: shopifyPlan !== "FREE" ? true : undefined,
+    trialUsed: trialEndsAt ? true : undefined,
+    trialEndsAt,
+    trialPlan,
   });
   console.log(`[billing] ${shop}: stored plan ${stored?.plan} → ${shopifyPlan} (from Shopify)`);
   await createAutomationLog({
@@ -3693,7 +3800,7 @@ export async function syncSubscriptionFromShopify(admin, shop) {
 /**
  * Update shop subscription plan
  */
-export async function updateShopSubscription(shop, plan, { trialUsed } = {}) {
+export async function updateShopSubscription(shop, plan, { trialUsed, trialEndsAt, trialPlan } = {}) {
   if (!isDbConfigured()) return { shop, plan, status: "ACTIVE" };
   await tryConnectDB();
   const updated = await Subscription.findOneAndUpdate(
@@ -3705,6 +3812,11 @@ export async function updateShopSubscription(shop, plan, { trialUsed } = {}) {
         startedAt: new Date(),
         // Only ever set to true. A downgrade must not hand back an unused trial.
         ...(trialUsed ? { trialUsed: true } : {}),
+        // Written whenever the caller knows the window — including as null, which is
+        // how a finished or cancelled trial stops being counted down in the UI. The
+        // `undefined` case leaves the stored value alone.
+        ...(trialEndsAt !== undefined ? { trialEndsAt } : {}),
+        ...(trialPlan !== undefined ? { trialPlan } : {}),
       },
     },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
@@ -3850,14 +3962,28 @@ function escapeRegExp(value) {
 /**
  * Add a customer back-in-stock subscriber
  */
-export async function addBackInStockSubscriber({ shop, email, productId, productTitle, variantId, variantTitle }) {
+export async function addBackInStockSubscriber({
+  shop,
+  email,
+  phone,
+  productId,
+  productTitle,
+  variantId,
+  variantTitle,
+}) {
   const cleanEmail = (email || "").toLowerCase().trim();
+  // Already E.164 by the time it gets here — the endpoint normalizes it against the
+  // shop's default dialling code, which is the only place that code is known.
+  const cleanPhone = (phone || "").trim();
   const cleanShop = normalizeShopDomain(shop);
+  const channel = cleanEmail && cleanPhone ? "BOTH" : cleanPhone ? "SMS" : "EMAIL";
 
   const record = {
     _id: `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     shop: cleanShop,
     email: cleanEmail,
+    phone: cleanPhone,
+    channel,
     productId: productId || "",
     productTitle: productTitle || "Restocked Product",
     variantId: variantId || "",
@@ -3866,8 +3992,17 @@ export async function addBackInStockSubscriber({ shop, email, productId, product
     createdAt: new Date(),
   };
 
+  // What identifies the same person asking again. An SMS-only subscriber has no
+  // address, so matching on email would fold every phone-only signup for a product
+  // into one document (they all carry email "") and each new number would overwrite
+  // the last.
+  const identity = cleanEmail ? { email: cleanEmail } : { phone: cleanPhone };
+
   const existingIdx = inMemorySubscribers.findIndex(
-    (s) => s.shop === cleanShop && s.email === cleanEmail && s.productId === productId
+    (s) =>
+      s.shop === cleanShop &&
+      s.productId === productId &&
+      (cleanEmail ? s.email === cleanEmail : s.phone === cleanPhone)
   );
   if (existingIdx >= 0) {
     inMemorySubscribers[existingIdx] = { ...inMemorySubscribers[existingIdx], ...record };
@@ -3880,15 +4015,20 @@ export async function addBackInStockSubscriber({ shop, email, productId, product
   try {
     await tryConnectDB();
     const subscriber = await BackInStockSubscriber.findOneAndUpdate(
-      { 
-        $or: [{ shop: cleanShop }, { shop: cleanShop.split(".")[0] }], 
-        email: cleanEmail, 
-        productId, 
-        variantId: variantId || "" 
+      {
+        $or: [{ shop: cleanShop }, { shop: cleanShop.split(".")[0] }],
+        ...identity,
+        productId,
+        variantId: variantId || "",
       },
       {
         $set: {
           shop: cleanShop,
+          email: cleanEmail,
+          // Re-subscribing with a number adds SMS to an existing email signup rather
+          // than creating a second row for the same person.
+          ...(cleanPhone ? { phone: cleanPhone } : {}),
+          channel,
           productTitle: productTitle || "",
           variantTitle: variantTitle || "",
           status: "SUBSCRIBED",
@@ -4030,8 +4170,16 @@ export async function notifyCustomerRestock(shop, { productId, variantId, produc
     return 0;
   }
 
-  // Loaded lazily: email.server imports back into this module for its audit trail.
+  // Loaded lazily: both modules import back into this one for their audit trail.
   const { sendCustomerBackInStockEmail } = await import("./email.server.js");
+  const { sendCustomerBackInStockSms } = await import("./sms.server.js");
+
+  // Resolved once for the whole batch rather than per subscriber: it is a database
+  // read plus a plan lookup, and a restock can wake hundreds of subscribers at once.
+  // Plan-clamped, so `enableSmsAlerts` is already false for any shop below the tier
+  // that includes SMS — no separate entitlement check is needed below.
+  const settings = await getEffectiveSettings(cleanShop);
+  const smsEnabled = Boolean(settings.enableSmsAlerts);
 
   const productUrl = productHandle
     ? `https://${cleanShop}/products/${productHandle}`
@@ -4039,22 +4187,71 @@ export async function notifyCustomerRestock(shop, { productId, variantId, produc
 
   const notified = [];
   const failed = [];
+  let emailCount = 0;
+  let smsCount = 0;
+  let smsHeldBack = 0;
   const now = new Date();
 
   for (const sub of subscribers) {
-    const result = await sendCustomerBackInStockEmail(cleanShop, {
-      customerEmail: sub.email,
-      productTitle: sub.productTitle || productTitle,
-      variantTitle: sub.variantTitle || variantTitle,
-      productUrl,
-    });
+    // What this subscriber asked to be reached on. A record written before the SMS
+    // feature existed has no `channel`, and an email address is what it holds.
+    const channel = sub.channel || "EMAIL";
+    const wantsEmail = channel !== "SMS" && Boolean(sub.email);
+    const wantsSms = channel !== "EMAIL" && Boolean(sub.phone);
 
-    if (!result.ok) {
-      failed.push(`${sub.email}: ${result.error}`);
+    const errors = [];
+    let delivered = false;
+
+    if (wantsEmail) {
+      const result = await sendCustomerBackInStockEmail(cleanShop, {
+        customerEmail: sub.email,
+        productTitle: sub.productTitle || productTitle,
+        variantTitle: sub.variantTitle || variantTitle,
+        productUrl,
+      });
+      if (result.ok) {
+        delivered = true;
+        emailCount++;
+      } else {
+        errors.push(`email ${sub.email}: ${result.error}`);
+      }
+    }
+
+    if (wantsSms && smsEnabled) {
+      const result = await sendCustomerBackInStockSms(cleanShop, {
+        customerPhone: sub.phone,
+        customerEmail: sub.email || "",
+        productTitle: sub.productTitle || productTitle,
+        variantTitle: sub.variantTitle || variantTitle,
+        productUrl,
+        settings,
+      });
+      if (result.ok) {
+        delivered = true;
+        smsCount++;
+      } else {
+        errors.push(`sms ${sub.phone}: ${result.error}`);
+      }
+    } else if (wantsSms) {
+      // The number is on file but the shop cannot text it right now — a downgrade
+      // from the tier that includes SMS, or credentials that were never filled in.
+      // Counted so the audit entry says so, and the subscriber is left SUBSCRIBED
+      // below unless their email got through.
+      smsHeldBack++;
+    }
+
+    if (!delivered) {
+      // Nothing reached this subscriber, so they stay in the queue: the next restock
+      // (or a manual send) still has a chance to reach them. An SMS-only subscriber
+      // on a shop that has switched SMS off is deliberately kept waiting rather than
+      // retired unmailed.
+      if (errors.length) failed.push(errors.join("; "));
+      else if (wantsSms) failed.push(`sms ${sub.phone}: SMS notifications are switched off for this shop`);
       continue;
     }
 
-    notified.push(sub.email);
+    notified.push(sub.email || sub.phone);
+    if (errors.length) failed.push(errors.join("; "));
 
     if (usingDb) {
       await BackInStockSubscriber.updateOne(
@@ -4066,13 +4263,22 @@ export async function notifyCustomerRestock(shop, { productId, variantId, produc
     // Kept in step whether or not a database is configured, so a memory-only run
     // does not mail the same customer again on the next restock.
     const memIdx = inMemorySubscribers.findIndex(
-      (s) => s.shop === cleanShop && s.email === sub.email && s.productId === sub.productId
+      (s) =>
+        s.shop === cleanShop &&
+        s.productId === sub.productId &&
+        (sub.email ? s.email === sub.email : s.phone === sub.phone)
     );
     if (memIdx >= 0) {
       inMemorySubscribers[memIdx].status = "NOTIFIED";
       inMemorySubscribers[memIdx].notifiedAt = now;
     }
   }
+
+  const channelSummary = [
+    `${emailCount} email(s)`,
+    `${smsCount} SMS`,
+    ...(smsHeldBack > 0 ? [`${smsHeldBack} SMS not sent (SMS switched off or unconfigured)`] : []),
+  ].join(", ");
 
   await createAutomationLog({
     shop: cleanShop,
@@ -4083,8 +4289,8 @@ export async function notifyCustomerRestock(shop, { productId, variantId, produc
     variantTitle: variantTitle || "Variant",
     actionTaken:
       notified.length > 0
-        ? `Back-in-stock email sent to ${notified.length} of ${subscribers.length} subscriber(s): ${notified.slice(0, 5).join(", ")}${notified.length > 5 ? ", …" : ""}`
-        : `Back-in-stock email failed for all ${subscribers.length} subscriber(s)`,
+        ? `Back-in-stock alert reached ${notified.length} of ${subscribers.length} subscriber(s) — ${channelSummary}: ${notified.slice(0, 5).join(", ")}${notified.length > 5 ? ", …" : ""}`
+        : `Back-in-stock alert failed for all ${subscribers.length} subscriber(s) — ${channelSummary}`,
     status: failed.length > 0 ? (notified.length > 0 ? "PARTIAL" : "FAILED") : "SUCCESS",
     details: failed.length > 0 ? failed.slice(0, 5).join(" | ") : null,
   }).catch(() => {});
@@ -4093,25 +4299,63 @@ export async function notifyCustomerRestock(shop, { productId, variantId, produc
 }
 
 /**
- * Manually dispatch restock alert email to a single subscriber
+ * Manually dispatch a restock alert to a single subscriber, on whichever channel(s)
+ * they signed up for.
+ *
+ * An SMS-only subscriber has no address to mail, so this cannot assume email: the
+ * "Send Alert Now" button on the Subscribers tab is the only way to reach them by
+ * hand, and it used to send them nothing while reporting success.
  */
-export async function dispatchSingleRestockAlert(shop, { subscriberId, email, productTitle, variantTitle }) {
+export async function dispatchSingleRestockAlert(
+  shop,
+  { subscriberId, email, phone, channel, productTitle, variantTitle }
+) {
   const cleanShop = normalizeShopDomain(shop);
   const { sendCustomerBackInStockEmail } = await import("./email.server.js");
+  const { sendCustomerBackInStockSms } = await import("./sms.server.js");
 
   const productUrl = `https://${cleanShop}/collections/all`;
+  const resolvedChannel = channel || (phone && !email ? "SMS" : "EMAIL");
+  const wantsEmail = resolvedChannel !== "SMS" && Boolean(email);
+  const wantsSms = resolvedChannel !== "EMAIL" && Boolean(phone);
 
-  const result = await sendCustomerBackInStockEmail(cleanShop, {
-    customerEmail: email,
-    productTitle: productTitle || "Restocked Product",
-    variantTitle: variantTitle || "",
-    productUrl,
-  });
-
-  if (!result.ok) {
-    return { ok: false, error: result.error };
+  if (!wantsEmail && !wantsSms) {
+    return { ok: false, error: "This subscriber has no email address or phone number on file." };
   }
 
+  const errors = [];
+  const sentOn = [];
+
+  if (wantsEmail) {
+    const emailResult = await sendCustomerBackInStockEmail(cleanShop, {
+      customerEmail: email,
+      productTitle: productTitle || "Restocked Product",
+      variantTitle: variantTitle || "",
+      productUrl,
+    });
+    if (emailResult.ok) sentOn.push("email");
+    else errors.push(`email: ${emailResult.error}`);
+  }
+
+  if (wantsSms) {
+    const smsResult = await sendCustomerBackInStockSms(cleanShop, {
+      customerPhone: phone,
+      customerEmail: email || "",
+      productTitle: productTitle || "Restocked Product",
+      variantTitle: variantTitle || "",
+      productUrl,
+    });
+    if (smsResult.ok) sentOn.push("SMS");
+    else errors.push(`SMS: ${smsResult.error}`);
+  }
+
+  // Only a send that reached nobody is a failure. A subscriber on both channels
+  // whose SMS bounced still got their email, and must not be left unretired.
+  if (sentOn.length === 0) {
+    return { ok: false, error: errors.join("; ") };
+  }
+
+  const result = { ok: true, sentOn };
   const now = new Date();
   if (isDbConfigured() && subscriberId) {
     try {
@@ -4126,7 +4370,9 @@ export async function dispatchSingleRestockAlert(shop, { subscriberId, email, pr
   }
 
   const memIdx = inMemorySubscribers.findIndex(
-    (s) => (subscriberId && s._id === subscriberId) || (s.shop === cleanShop && s.email === email)
+    (s) =>
+      (subscriberId && s._id === subscriberId) ||
+      (s.shop === cleanShop && ((email && s.email === email) || (phone && s.phone === phone)))
   );
   if (memIdx >= 0) {
     inMemorySubscribers[memIdx].status = "NOTIFIED";
@@ -4139,11 +4385,12 @@ export async function dispatchSingleRestockAlert(shop, { subscriberId, email, pr
     productId: "MANUAL_DISPATCH",
     productTitle: productTitle || "Restocked Product",
     variantTitle: variantTitle || "Variant",
-    actionTaken: `Manual restock email dispatched to customer ${email} for product '${productTitle || "Restocked Product"}'.`,
-    status: "SUCCESS",
+    actionTaken: `Manual restock alert dispatched by ${sentOn.join(" and ")} to ${[email, phone].filter(Boolean).join(" / ")} for product '${productTitle || "Restocked Product"}'.`,
+    status: errors.length > 0 ? "PARTIAL" : "SUCCESS",
+    details: errors.length > 0 ? errors.join(" | ") : null,
   }).catch(() => {});
 
-  return { ok: true };
+  return { ...result, error: errors.length > 0 ? errors.join("; ") : null };
 }
 
 

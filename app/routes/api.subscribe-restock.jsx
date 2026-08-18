@@ -1,10 +1,12 @@
 import {
   addBackInStockSubscriber,
   createAutomationLog,
+  getEffectiveSettings,
   isShopInstalled,
   shopAllowsFeature,
 } from "../models/inventory.server";
 import { sendCustomerSubscriptionConfirmationEmail, isValidEmail } from "../models/email.server";
+import { normalizePhone } from "../models/sms.server";
 import { authenticate } from "../shopify.server";
 
 const CORS_HEADERS = {
@@ -66,14 +68,26 @@ export const action = async ({ request }) => {
     return json({ success: false, error: "Invalid request body" }, 400);
   }
 
-  const { email, productId, productTitle, variantId, variantTitle } = body;
+  const { email, phone, productId, productTitle, variantId, variantTitle } = body;
   const { shop, verified } = await resolveShop(request, body.shop);
 
   if (!shop || !productId) {
     return json({ success: false, error: "Missing required fields: shop, productId" }, 400);
   }
 
-  if (!isValidEmail(email)) {
+  const hasEmail = Boolean(String(email || "").trim());
+  const hasPhone = Boolean(String(phone || "").trim());
+
+  // One contact detail is enough, and which one is the customer's choice: the
+  // storefront form can be configured to collect a number, an address, or both.
+  if (!hasEmail && !hasPhone) {
+    return json(
+      { success: false, error: "Enter an email address or a mobile number so we can reach you." },
+      400
+    );
+  }
+
+  if (hasEmail && !isValidEmail(email)) {
     return json({ success: false, error: "Please enter a valid email address." }, 400);
   }
 
@@ -96,10 +110,45 @@ export const action = async ({ request }) => {
     );
   }
 
+  // A number is only worth storing if this shop can actually text it: SMS is a
+  // gated capability and needs the merchant's provider credentials. When it cannot,
+  // the subscription still goes through on email — dropping the whole request would
+  // lose a customer over a feature they never asked about.
+  let normalizedPhone = "";
+  let smsRejection = null;
+  if (hasPhone) {
+    const settings = await getEffectiveSettings(shop);
+    if (!settings.enableSmsAlerts) {
+      smsRejection = "SMS notifications are not switched on for this store";
+    } else {
+      normalizedPhone = normalizePhone(phone, settings.smsDefaultCountryCode) || "";
+      if (!normalizedPhone) smsRejection = "the number could not be read";
+    }
+
+    if (smsRejection) {
+      console.warn(`[api.subscribe-restock] Phone ignored for ${shop}: ${smsRejection}`);
+      // Nothing else to fall back on, so the customer has to be told rather than
+      // shown a confirmation for a subscription that would never reach them.
+      if (!hasEmail) {
+        return json(
+          {
+            success: false,
+            error:
+              smsRejection === "the number could not be read"
+                ? "That mobile number could not be read. Include your country code, e.g. +1 415 555 0123."
+                : "SMS alerts are not available on this store right now — please use your email address instead.",
+          },
+          400
+        );
+      }
+    }
+  }
+
   try {
     const subscriber = await addBackInStockSubscriber({
       shop,
-      email,
+      email: hasEmail ? email : "",
+      phone: normalizedPhone,
       productId,
       productTitle,
       variantId,
@@ -108,14 +157,21 @@ export const action = async ({ request }) => {
 
     // The subscription itself is what the customer is waiting on, so neither the
     // confirmation email nor the audit entry is allowed to hold up the response
-    // or to fail the request.
-    sendCustomerSubscriptionConfirmationEmail(shop, {
-      customerEmail: email,
-      productTitle,
-      variantTitle,
-    }).catch((emailErr) =>
-      console.warn("[api.subscribe-restock] Confirmation email error:", emailErr.message)
-    );
+    // or to fail the request. No address, no confirmation mail — an SMS-only
+    // signup is deliberately not sent a courtesy text, because every message the
+    // merchant sends is one they pay for.
+    if (hasEmail) {
+      sendCustomerSubscriptionConfirmationEmail(shop, {
+        customerEmail: email,
+        productTitle,
+        variantTitle,
+      }).catch((emailErr) =>
+        console.warn("[api.subscribe-restock] Confirmation email error:", emailErr.message)
+      );
+    }
+
+    const contact = [hasEmail ? email : null, normalizedPhone || null].filter(Boolean).join(" / ");
+    const channelLabel = normalizedPhone ? (hasEmail ? "email and SMS" : "SMS") : "email";
 
     createAutomationLog({
       shop,
@@ -124,15 +180,21 @@ export const action = async ({ request }) => {
       productTitle: productTitle || "Restocked Item",
       variantId: variantId || "",
       variantTitle: variantTitle || "Default Variant",
-      actionTaken: `Customer (${email}) subscribed for back-in-stock notifications.`,
+      actionTaken: `Customer (${contact}) subscribed for back-in-stock notifications by ${channelLabel}.`,
       status: "SUCCESS",
+      details: smsRejection ? `Mobile number was not stored: ${smsRejection}.` : null,
     }).catch(() => {});
 
-    console.log(`[api.subscribe-restock] ${email} subscribed to ${productTitle || productId} for ${shop}`);
+    console.log(
+      `[api.subscribe-restock] ${contact} subscribed to ${productTitle || productId} for ${shop} (${channelLabel})`
+    );
 
     return json({
       success: true,
-      message: "Successfully subscribed to back-in-stock notifications!",
+      message: normalizedPhone
+        ? `Subscribed! We'll let you know by ${channelLabel} as soon as this item is back.`
+        : "Successfully subscribed to back-in-stock notifications!",
+      channel: normalizedPhone ? (hasEmail ? "BOTH" : "SMS") : "EMAIL",
       subscriber,
     });
   } catch (err) {

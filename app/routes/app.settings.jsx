@@ -26,6 +26,7 @@ import {
   sendSupportTicketAdminEmail,
   sendSupportTicketReplyEmail,
 } from "../models/email.server";
+import { resolveSmsConfig, sendTestSms, smsSegments, renderSmsTemplate } from "../models/sms.server";
 import { getPlan, featureGate } from "../utils/planLimits";
 
 // Where merchant tickets are sent, and the address a merchant reaches by replying
@@ -39,7 +40,25 @@ export const loader = async ({ request }) => {
 
   const { subscription } = await syncSubscriptionFromShopify(admin, session.shop);
 
-  const settings = await getInventorySettings(session.shop);
+  const storedSettings = await getInventorySettings(session.shop);
+
+  // Provider credentials never leave the server.
+  //
+  // The loader's return value is serialized into the page the merchant's browser
+  // receives, so sending the Twilio auth token or the Klaviyo private key would
+  // publish a live credential into the DOM (and into anything that caches it). The
+  // form renders these as "configured / not configured" instead, and a blank field
+  // on save means "leave it as it is" — see emptyMeansUnchanged in inventory.server.
+  const { twilioAuthToken, klaviyoApiKey, ...safeSettings } = storedSettings;
+  const settings = {
+    ...safeSettings,
+    hasTwilioAuthToken: Boolean(twilioAuthToken),
+    hasKlaviyoApiKey: Boolean(klaviyoApiKey),
+  };
+
+  // Resolved from the *unmasked* settings, so "ready" accounts for a credential
+  // supplied by an environment variable as well as one saved in the dashboard.
+  const smsConfig = resolveSmsConfig(storedSettings);
   // The support desk answers tickets from every store, so it reads them all; a
   // merchant reads only their own. getSupportTickets has always supported this —
   // nothing had ever asked it for more than one shop.
@@ -69,6 +88,28 @@ export const loader = async ({ request }) => {
       purchaseOrders: featureGate(subscription?.plan, "purchaseOrders"),
       backInStockWidget: featureGate(subscription?.plan, "backInStockWidget"),
       emailAlerts: featureGate(subscription?.plan, "emailAlerts"),
+      smsAlerts: featureGate(subscription?.plan, "smsAlerts"),
+    },
+    smsConfig: {
+      provider: smsConfig.provider,
+      ready: smsConfig.ready,
+      missing: smsConfig.missing,
+      // What a customer would actually receive, so the merchant can check their
+      // template renders before spending a message on a test.
+      preview: renderSmsTemplate(smsConfig.template, {
+        product: "Merino Beanie",
+        variant: "Charcoal",
+        url: `https://${session.shop}/products/merino-beanie`,
+        shop: session.shop,
+      }),
+      segments: smsSegments(
+        renderSmsTemplate(smsConfig.template, {
+          product: "Merino Beanie",
+          variant: "Charcoal",
+          url: `https://${session.shop}/products/merino-beanie`,
+          shop: session.shop,
+        })
+      ),
     },
     supportTickets,
     purchaseOrders,
@@ -226,6 +267,90 @@ export const action = async ({ request }) => {
   // Shopify Billing. Leaving a second copy here meant two places could grant a
   // tier, and this one did it without verifying the charge.
 
+  if (intent === "save_sms_settings") {
+    // Enforced here and not only by the locked panel: the form can be posted
+    // directly, and this write is what the storefront and the sender both read.
+    if (!features.smsAlerts) return denyUpgrade("smsAlerts");
+
+    const enabledRaw = formData.get("enableSmsAlerts");
+
+    const updated = await updateInventorySettings(session.shop, {
+      enableSmsAlerts: enabledRaw === "on" || enabledRaw === "true",
+      smsProvider: formData.get("smsProvider"),
+      twilioAccountSid: formData.get("twilioAccountSid"),
+      // Blank keeps the stored secret — the field is rendered masked, so an empty
+      // submission is a merchant who edited something else on the same form.
+      twilioAuthToken: formData.get("twilioAuthToken"),
+      twilioFromNumber: formData.get("twilioFromNumber"),
+      klaviyoApiKey: formData.get("klaviyoApiKey"),
+      klaviyoSmsListId: formData.get("klaviyoSmsListId"),
+      klaviyoMetricName: formData.get("klaviyoMetricName"),
+      smsDefaultCountryCode: formData.get("smsDefaultCountryCode"),
+      smsRestockTemplate: formData.get("smsRestockTemplate"),
+    });
+
+    // The storefront form only asks for a phone number when this is on, and that
+    // entitlement travels in the shop metafield — so the theme has to be told.
+    await syncStorefrontConfig(admin, session.shop);
+
+    const config = resolveSmsConfig(updated);
+    const preview = renderSmsTemplate(config.template, {
+      product: "Merino Beanie",
+      variant: "Charcoal",
+      url: `https://${session.shop}/products/merino-beanie`,
+      shop: session.shop,
+    });
+
+    await createAutomationLog({
+      shop: session.shop,
+      eventType: "SMS_SETTINGS",
+      productTitle: `SMS restock notifications ${updated.enableSmsAlerts ? "enabled" : "disabled"}`,
+      variantTitle: config.provider,
+      actionTaken: updated.enableSmsAlerts
+        ? `SMS alerts are on via ${config.provider}.${config.ready ? "" : ` Not sending yet — missing: ${config.missing.join(", ")}.`}`
+        : "SMS alerts are off; the storefront form has stopped asking for phone numbers.",
+      status: updated.enableSmsAlerts && !config.ready ? "PARTIAL" : "SUCCESS",
+    }).catch(() => {});
+
+    return {
+      success: true,
+      type: "save_sms_settings",
+      settings: {
+        ...updated,
+        twilioAuthToken: undefined,
+        klaviyoApiKey: undefined,
+        hasTwilioAuthToken: Boolean(updated.twilioAuthToken),
+        hasKlaviyoApiKey: Boolean(updated.klaviyoApiKey),
+      },
+      smsConfig: {
+        provider: config.provider,
+        ready: config.ready,
+        missing: config.missing,
+        preview,
+        segments: smsSegments(preview),
+      },
+      message: config.ready || !updated.enableSmsAlerts
+        ? "SMS notification settings saved."
+        : `Saved, but nothing can be sent yet — missing: ${config.missing.join(", ")}.`,
+    };
+  }
+
+  if (intent === "send_test_sms") {
+    if (!features.smsAlerts) return denyUpgrade("smsAlerts");
+
+    const result = await sendTestSms(session.shop, { toPhone: formData.get("testPhone") });
+
+    return {
+      success: result.ok,
+      type: "send_test_sms",
+      message: result.ok
+        ? result.queued
+          ? `Klaviyo accepted the event for ${result.to}. Your Klaviyo flow sends the message itself — check the flow is live and listening for that metric.`
+          : `Test SMS sent to ${result.to} (${result.segments} segment${result.segments === 1 ? "" : "s"}).`
+        : `Test SMS failed: ${result.error}`,
+    };
+  }
+
   if (intent === "save_email_settings") {
     const emailAlertsRaw = formData.get("enableEmailAlerts");
     const stockoutRaw = formData.get("notifyOnStockout");
@@ -252,25 +377,31 @@ export const action = async ({ request }) => {
     const result = await dispatchSingleRestockAlert(session.shop, {
       subscriberId,
       email: customerEmail,
+      phone: formData.get("customerPhone") || "",
+      channel: formData.get("channel") || "",
       productTitle,
       variantTitle,
     });
 
     const updatedSubscribers = await getBackInStockSubscribers(session.shop);
 
+    const recipient = customerEmail || formData.get("customerPhone") || "the subscriber";
+
     if (result.ok) {
       return {
         success: true,
         type: "dispatch_alert",
         subscribers: updatedSubscribers,
-        message: `Restock alert email sent successfully to ${customerEmail}!`,
+        message: `Restock alert sent to ${recipient} by ${(result.sentOn || ["email"]).join(" and ")}!${
+          result.error ? ` One channel failed: ${result.error}` : ""
+        }`,
       };
     } else {
       return {
         success: false,
         type: "dispatch_alert",
         subscribers: updatedSubscribers,
-        message: `Failed to send email to ${customerEmail}: ${result.error || "Unknown error"}`,
+        message: `Failed to reach ${recipient}: ${result.error || "Unknown error"}`,
       };
     }
   }
@@ -389,6 +520,7 @@ export default function Settings() {
     embedEnabled,
     initialTab,
     gates,
+    smsConfig: initialSmsConfig,
     isSupportAdmin,
   } = useLoaderData();
   const fetcher = useFetcher();
@@ -419,6 +551,16 @@ export default function Settings() {
   const [activeTicket, setActiveTicket] = useState(null);
   const [replyText, setReplyText] = useState("");
   const [replyStatus, setReplyStatus] = useState("RESOLVED");
+
+  // SMS / Klaviyo State. The credentials are write-only from here: the loader sends
+  // `hasTwilioAuthToken` / `hasKlaviyoApiKey` instead of the secrets, and a field
+  // left blank keeps whatever is stored.
+  const [smsEnabled, setSmsEnabled] = useState(Boolean(settings?.enableSmsAlerts));
+  const [smsProvider, setSmsProvider] = useState(settings?.smsProvider || "TWILIO");
+  const [smsTemplate, setSmsTemplate] = useState(
+    settings?.smsRestockTemplate || "{{product}} is back in stock at {{shop}}. Get it here: {{url}}"
+  );
+  const [testPhone, setTestPhone] = useState("");
 
   // Email Notification Preferences State
   const [emailAlertsEnabled, setEmailAlertsEnabled] = useState(settings?.enableEmailAlerts !== false);
@@ -458,6 +600,9 @@ export default function Settings() {
         shopify?.toast?.show?.(fetcher.data.message || "Failed to send restock alert email.", { isError: true });
       }
     }
+    if (fetcher.data?.type === "save_sms_settings" || fetcher.data?.type === "send_test_sms") {
+      shopify?.toast?.show?.(fetcher.data.message, { isError: !fetcher.data.success });
+    }
     if (fetcher.data?.type === "ticket_reply_failed") {
       shopify?.toast?.show?.(fetcher.data.message, { isError: true });
     }
@@ -472,6 +617,11 @@ export default function Settings() {
   const poGate = gates?.purchaseOrders || { allowed: true };
   const restockGate = gates?.backInStockWidget || { allowed: true };
   const emailGate = gates?.emailAlerts || { allowed: true };
+  const smsGate = gates?.smsAlerts || { allowed: true };
+  const smsConfig = fetcher.data?.smsConfig || initialSmsConfig || {};
+  const smsSettings = fetcher.data?.type === "save_sms_settings" ? fetcher.data.settings : settings;
+  const isSavingSms = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_sms_settings";
+  const isSendingTestSms = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "send_test_sms";
 
   const isSavingThresholds = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_thresholds";
   const isSavingEmail = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_email_settings";
@@ -627,6 +777,39 @@ export default function Settings() {
           {restockGate.allowed && subscribersList.length > 0 && (
             <span style={{ background: "#fef3c7", color: "#92400e", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {subscribersList.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab("sms")}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "sms" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "sms" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "sms" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
+        >
+          SMS &amp; Klaviyo {smsGate.allowed ? "📱" : "🔒"}
+          {smsGate.allowed && smsSettings?.enableSmsAlerts && (
+            <span
+              style={{
+                background: smsConfig.ready ? "#dcfce7" : "#fef3c7",
+                color: smsConfig.ready ? "#166534" : "#92400e",
+                padding: "2px 8px",
+                borderRadius: "12px",
+                fontSize: "11px",
+                fontWeight: "700",
+              }}
+            >
+              {smsConfig.ready ? "LIVE" : "SETUP"}
             </span>
           )}
         </button>
@@ -1082,7 +1265,7 @@ export default function Settings() {
               <tbody>
                 {posList.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: "center", padding: "32px", color: "var(--text-muted)" }}>
+                    <td colSpan={8} style={{ textAlign: "center", padding: "32px", color: "var(--text-muted)" }}>
                       No Purchase Orders generated yet. Use the form above to generate your first PO.
                     </td>
                   </tr>
@@ -1186,7 +1369,7 @@ export default function Settings() {
               <div>
                 <h3 style={{ margin: "0 0 4px 0", fontSize: "16px", color: "#1e1b4b" }}>Customer Restock Notification Queue</h3>
                 <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
-                  Automated emails fire instantly when items are restocked in Shopify (0 &rarr; &gt;0 inventory).
+                  Automated alerts fire instantly when items are restocked in Shopify (0 &rarr; &gt;0 inventory) — by email, and by SMS for subscribers who left a number.
                 </p>
               </div>
               <span className="badge badge-healthy" style={{ background: "#ecfdf5", color: "#047857", padding: "6px 14px", borderRadius: "20px", fontWeight: "600" }}>
@@ -1201,7 +1384,8 @@ export default function Settings() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Customer Email</th>
+                  <th>Customer Contact</th>
+                  <th>Channel</th>
                   <th>Product Requested</th>
                   <th>Variant</th>
                   <th>Status</th>
@@ -1222,8 +1406,33 @@ export default function Settings() {
                     const subId = sub.id || sub._id || "";
                     const isDispatchingThis = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "dispatch_restock_alert" && fetcher.formData?.get("subscriberId") === String(subId);
                     return (
-                      <tr key={subId || `${sub.email}-${sub.productId}`}>
-                        <td style={{ fontWeight: "600", color: "#1e293b" }}>{sub.email}</td>
+                      <tr key={subId || `${sub.email || sub.phone}-${sub.productId}`}>
+                        <td style={{ fontWeight: "600", color: "#1e293b" }}>
+                          {sub.email || <span style={{ color: "var(--text-muted)" }}>No email</span>}
+                          {sub.phone && (
+                            <div style={{ fontSize: "12px", fontWeight: "500", color: "#475569", marginTop: "2px" }}>
+                              {sub.phone}
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          {(() => {
+                            // Records written before SMS existed carry no channel, and an
+                            // email address is what they hold.
+                            const channel = sub.channel || "EMAIL";
+                            const label =
+                              channel === "BOTH" ? "Email + SMS" : channel === "SMS" ? "SMS" : "Email";
+                            const tint =
+                              channel === "EMAIL"
+                                ? { background: "#eef2ff", color: "#3730a3" }
+                                : { background: "#ecfdf5", color: "#047857" };
+                            return (
+                              <span style={{ ...tint, padding: "3px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
+                                {label}
+                              </span>
+                            );
+                          })()}
+                        </td>
                         <td style={{ fontWeight: "600" }}>{sub.productTitle || sub.productId}</td>
                         <td>{sub.variantTitle || "Default Variant"}</td>
                         <td>
@@ -1244,6 +1453,8 @@ export default function Settings() {
                             <input type="hidden" name="intent" value="dispatch_restock_alert" />
                             <input type="hidden" name="subscriberId" value={subId} />
                             <input type="hidden" name="customerEmail" value={sub.email || ""} />
+                            <input type="hidden" name="customerPhone" value={sub.phone || ""} />
+                            <input type="hidden" name="channel" value={sub.channel || "EMAIL"} />
                             <input type="hidden" name="productTitle" value={sub.productTitle || ""} />
                             <input type="hidden" name="variantTitle" value={sub.variantTitle || ""} />
                             <button
@@ -1276,7 +1487,313 @@ export default function Settings() {
         </>
       )}
 
-      {/* TAB 4: SUPPORT & HELP DESK */}
+      {/* TAB 4: SMS & KLAVIYO RESTOCK NOTIFICATIONS (ENTERPRISE) */}
+      {activeTab === "sms" && !smsGate.allowed && (
+        <PlanLockedPanel
+          gate={smsGate}
+          title="SMS Restock Notifications 📱"
+          description="Text a waiting customer the moment their item is back — the fastest channel there is, and the one they read within minutes. Sent through your own Twilio account, or handed to Klaviyo so your existing SMS flows do the sending."
+          bullets={[
+            "Collect a mobile number alongside the email address on the storefront Notify Me form",
+            "Send instantly over Twilio, or push a Back-in-Stock event into Klaviyo for your flow",
+            "Record SMS marketing consent against a Klaviyo list automatically",
+            "Write your own message template with product, variant and product-link placeholders",
+            "Every send recorded in the activity log, with per-channel delivery results",
+          ]}
+        />
+      )}
+
+      {activeTab === "sms" && smsGate.allowed && (
+        <>
+          <div className="table-card" style={{ padding: "24px", marginBottom: "24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
+              <div>
+                <h2 style={{ fontSize: "18px", margin: "0 0 4px 0", color: "#1e1b4b" }}>
+                  SMS Restock Notifications
+                </h2>
+                <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)", maxWidth: "620px", lineHeight: "1.5" }}>
+                  Text waiting customers the moment their item is back in stock. Messages are sent from
+                  your own Twilio or Klaviyo account, so the per-message cost and the sender identity
+                  are yours.
+                </p>
+              </div>
+
+              <span
+                style={{
+                  fontSize: "12px",
+                  fontWeight: "700",
+                  padding: "6px 14px",
+                  borderRadius: "20px",
+                  background: !smsSettings?.enableSmsAlerts ? "#f1f5f9" : smsConfig.ready ? "#dcfce7" : "#fef3c7",
+                  color: !smsSettings?.enableSmsAlerts ? "#475569" : smsConfig.ready ? "#166534" : "#92400e",
+                  border: `1px solid ${!smsSettings?.enableSmsAlerts ? "#e2e8f0" : smsConfig.ready ? "#a7f3d0" : "#fcd34d"}`,
+                }}
+              >
+                {!smsSettings?.enableSmsAlerts
+                  ? "Off"
+                  : smsConfig.ready
+                  ? `Live via ${smsConfig.provider}`
+                  : "Needs credentials"}
+              </span>
+            </div>
+
+            {smsSettings?.enableSmsAlerts && !smsConfig.ready && (
+              <div style={{ marginTop: "16px", padding: "12px 16px", background: "#fffbeb", border: "1px solid #fcd34d", borderRadius: "8px", fontSize: "13px", color: "#92400e", lineHeight: "1.5" }}>
+                <strong>Nothing is being sent yet.</strong> Missing:{" "}
+                {(smsConfig.missing || []).join(", ")}. Restock emails carry on as normal in the
+                meantime, and any numbers already collected stay in the queue.
+              </div>
+            )}
+          </div>
+
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="save_sms_settings" />
+
+            <div className="table-card" style={{ padding: "24px", marginBottom: "24px" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: "12px", marginBottom: "20px" }}>
+                <input
+                  id="enableSmsAlerts"
+                  type="checkbox"
+                  name="enableSmsAlerts"
+                  checked={smsEnabled}
+                  onChange={(e) => setSmsEnabled(e.target.checked)}
+                  style={{ width: "18px", height: "18px", marginTop: "2px", accentColor: "#4f46e5", cursor: "pointer" }}
+                />
+                <label htmlFor="enableSmsAlerts" style={{ cursor: "pointer" }}>
+                  <strong style={{ fontSize: "14px", color: "#1e293b" }}>Send SMS restock notifications</strong>
+                  <span style={{ display: "block", fontSize: "12px", color: "var(--text-muted)", marginTop: "3px", lineHeight: "1.5" }}>
+                    Turning this on also adds an optional mobile number field to the storefront
+                    &ldquo;Notify me&rdquo; form. Turning it off removes the field again and stops every
+                    SMS — waiting subscribers keep their place in the queue.
+                  </span>
+                </label>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "18px" }}>
+                <div>
+                  <label htmlFor="smsProvider" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                    Provider
+                  </label>
+                  <select
+                    id="smsProvider"
+                    name="smsProvider"
+                    value={smsProvider}
+                    onChange={(e) => setSmsProvider(e.target.value)}
+                    className="form-input"
+                    style={{ width: "100%", height: "40px", padding: "0 10px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                  >
+                    <option value="TWILIO">Twilio — this app sends the message</option>
+                    <option value="KLAVIYO">Klaviyo — your flow sends the message</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="smsDefaultCountryCode" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                    Default country code
+                  </label>
+                  <input
+                    id="smsDefaultCountryCode"
+                    name="smsDefaultCountryCode"
+                    type="text"
+                    defaultValue={smsSettings?.smsDefaultCountryCode || "+1"}
+                    placeholder="+1"
+                    style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                  />
+                  <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                    Applied to numbers a customer types without one, e.g. 555 010 9999.
+                  </div>
+                </div>
+              </div>
+
+              {smsProvider === "TWILIO" ? (
+                <div style={{ marginTop: "22px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
+                  <h3 style={{ fontSize: "14px", margin: "0 0 14px 0", color: "#312e81" }}>Twilio credentials</h3>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "18px" }}>
+                    <div>
+                      <label htmlFor="twilioAccountSid" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                        Account SID
+                      </label>
+                      <input
+                        id="twilioAccountSid"
+                        name="twilioAccountSid"
+                        type="text"
+                        defaultValue={smsSettings?.twilioAccountSid || ""}
+                        placeholder="AC…"
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="twilioAuthToken" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                        Auth Token
+                      </label>
+                      <input
+                        id="twilioAuthToken"
+                        name="twilioAuthToken"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder={smsSettings?.hasTwilioAuthToken ? "•••••••• (saved — leave blank to keep)" : "Your Twilio auth token"}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                      />
+                      <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                        Never shown back to you. Leave blank to keep the saved token.
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="twilioFromNumber" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                        Sender number or Messaging Service SID
+                      </label>
+                      <input
+                        id="twilioFromNumber"
+                        name="twilioFromNumber"
+                        type="text"
+                        defaultValue={smsSettings?.twilioFromNumber || ""}
+                        placeholder="+14155550123 or MG…"
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: "22px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
+                  <h3 style={{ fontSize: "14px", margin: "0 0 14px 0", color: "#312e81" }}>Klaviyo connection</h3>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "18px" }}>
+                    <div>
+                      <label htmlFor="klaviyoApiKey" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                        Private API key
+                      </label>
+                      <input
+                        id="klaviyoApiKey"
+                        name="klaviyoApiKey"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder={smsSettings?.hasKlaviyoApiKey ? "•••••••• (saved — leave blank to keep)" : "pk_…"}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                      />
+                      <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                        Needs the Profiles and Events write scopes.
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="klaviyoSmsListId" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                        SMS list ID (optional)
+                      </label>
+                      <input
+                        id="klaviyoSmsListId"
+                        name="klaviyoSmsListId"
+                        type="text"
+                        defaultValue={smsSettings?.klaviyoSmsListId || ""}
+                        placeholder="e.g. Y6nRLr"
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                      />
+                      <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                        Given a list, SMS marketing consent is recorded against it before the event is
+                        sent. Leave blank if you manage consent elsewhere.
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="klaviyoMetricName" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                        Metric name
+                      </label>
+                      <input
+                        id="klaviyoMetricName"
+                        name="klaviyoMetricName"
+                        type="text"
+                        defaultValue={smsSettings?.klaviyoMetricName || "StockShield Back in Stock"}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: "16px", padding: "12px 16px", background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: "8px", fontSize: "12.5px", color: "#3730a3", lineHeight: "1.55" }}>
+                    <strong>One step in Klaviyo:</strong> Klaviyo has no send-now API — it sends from
+                    flows. Build a flow triggered by the metric above, add an SMS step, and use the{" "}
+                    <code>sms_message</code> event property (or <code>product_title</code> and{" "}
+                    <code>product_url</code>) for the copy. Until that flow is live, this app will
+                    report the event as accepted and no text will go out.
+                  </div>
+                </div>
+              )}
+
+              <div style={{ marginTop: "22px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
+                <label htmlFor="smsRestockTemplate" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
+                  Message template
+                </label>
+                <textarea
+                  id="smsRestockTemplate"
+                  name="smsRestockTemplate"
+                  rows={3}
+                  value={smsTemplate}
+                  onChange={(e) => setSmsTemplate(e.target.value)}
+                  style={{ width: "100%", padding: "10px 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", fontFamily: "inherit", lineHeight: "1.5", resize: "vertical" }}
+                />
+                <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "6px" }}>
+                  Placeholders: <code>{"{{product}}"}</code> <code>{"{{variant}}"}</code>{" "}
+                  <code>{"{{url}}"}</code> <code>{"{{shop}}"}</code>. A single-variant product leaves
+                  <code>{"{{variant}}"}</code> empty.
+                </div>
+
+                {smsConfig.preview && (
+                  <div style={{ marginTop: "14px", padding: "14px 16px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "10px" }}>
+                    <div style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", color: "#475569", marginBottom: "6px" }}>
+                      Saved template preview
+                    </div>
+                    <div style={{ fontSize: "13px", color: "#0f172a", lineHeight: "1.5" }}>{smsConfig.preview}</div>
+                    <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "8px" }}>
+                      Billed as {smsConfig.segments} SMS segment{smsConfig.segments === 1 ? "" : "s"} per
+                      message. Emoji and curly quotes cut a segment from 160 characters to 70.
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginTop: "22px", display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={isSavingSms}
+                  style={{ padding: "10px 22px", fontWeight: "600", borderRadius: "8px", background: "#4f46e5", opacity: isSavingSms ? 0.7 : 1 }}
+                >
+                  {isSavingSms ? "Saving..." : "Save SMS Settings"}
+                </button>
+              </div>
+            </div>
+          </fetcher.Form>
+
+          <div className="table-card" style={{ padding: "24px" }}>
+            <h3 style={{ fontSize: "15px", margin: "0 0 4px 0", color: "#1e1b4b" }}>Send a test message</h3>
+            <p style={{ margin: "0 0 16px 0", fontSize: "13px", color: "var(--text-muted)", lineHeight: "1.5" }}>
+              Goes through the same path as a real restock alert, using the settings you have saved —
+              so a message that arrives here is one a customer would get. Save your changes first.
+            </p>
+
+            <fetcher.Form method="post" style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
+              <input type="hidden" name="intent" value="send_test_sms" />
+              <input
+                type="tel"
+                name="testPhone"
+                value={testPhone}
+                onChange={(e) => setTestPhone(e.target.value)}
+                placeholder="+14155550123"
+                style={{ flex: "1", minWidth: "220px", height: "42px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+              />
+              <button
+                type="submit"
+                className="btn-secondary"
+                disabled={isSendingTestSms || !testPhone.trim()}
+                style={{ height: "42px", padding: "0 20px", fontWeight: "600", borderRadius: "8px", opacity: isSendingTestSms || !testPhone.trim() ? 0.6 : 1 }}
+              >
+                {isSendingTestSms ? "Sending..." : "Send test SMS"}
+              </button>
+            </fetcher.Form>
+          </div>
+        </>
+      )}
+
+      {/* TAB 5: SUPPORT & HELP DESK */}
       {activeTab === "support" && (
         <>
           {/* MERCHANT SUPPORT FORM */}

@@ -11,7 +11,15 @@ import {
   cancelActiveSubscriptions,
   getShopSubscription,
 } from "../models/inventory.server";
-import { getPlan, normalizePlan, PLAN_ORDER, PLAN_PRICES } from "../utils/planLimits";
+import {
+  getPlan,
+  normalizePlan,
+  trialDaysFor,
+  trialStatus,
+  PLAN_ORDER,
+  PLAN_PRICES,
+  PLAN_TRIAL_DAYS,
+} from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -42,7 +50,11 @@ export const loader = async ({ request }) => {
         eventType: "BILLING_ACTIVATE",
         productTitle: `Subscription activated: ${subscription.plan}`,
         variantTitle: "Shopify Billing Confirmed",
-        actionTaken: `Shopify confirms an active ${subscription.plan} subscription. Plan features enabled.`,
+        actionTaken: `Shopify confirms an active ${subscription.plan} subscription. Plan features enabled.${
+          subscription.trialEndsAt
+            ? ` Free trial runs until ${new Date(subscription.trialEndsAt).toISOString().slice(0, 10)}; the first charge is taken then.`
+            : ""
+        }`,
         status: "SUCCESS",
       });
     } else if (!confirmed) {
@@ -68,6 +80,12 @@ export const loader = async ({ request }) => {
     chargeApproved: chargeApproved === "true",
     activatedPlan,
     activationRejected,
+    // Resolved from the stored record, whose trial window was written from Shopify's
+    // own billing data by syncSubscriptionFromShopify above. The pricing table reads
+    // this rather than assuming every paid tier is on offer with a trial, so a shop
+    // that has used its trial is not promised a second one.
+    trial: trialStatus(subscription),
+    planTrialDays: PLAN_TRIAL_DAYS,
   };
 };
 
@@ -122,11 +140,12 @@ export const action = async ({ request }) => {
       };
     }
 
-    // The Plan page advertises a 7-day free trial, so the charge has to ask for one.
-    // Granted once per shop: trialDays applies to each subscription Shopify creates,
-    // so without the flag a merchant could switch plans repeatedly and never pay.
+    // The trial this tier is advertised with — 7 days on Growth and Pro, none on
+    // Enterprise — and 0 for a shop that has already had one. Both halves of that
+    // come from the plan matrix, so the charge cannot offer a trial the pricing
+    // table does not, or withhold one it does.
     const stored = await getShopSubscription(session.shop);
-    const trialDays = stored?.trialUsed ? 0 : 7;
+    const trialDays = trialDaysFor(plan, stored);
 
     const appIdentifier = (
       process.env.SHOPIFY_API_KEY ||
@@ -185,7 +204,7 @@ export const action = async ({ request }) => {
       if (userErrors.length) {
         billingError = userErrors.map((e) => e.message).join("; ");
       } else if (result?.confirmationUrl) {
-        return { success: true, confirmationUrl: result.confirmationUrl, plan };
+        return { success: true, confirmationUrl: result.confirmationUrl, plan, trialDays };
       } else {
         billingError = "Shopify returned no confirmation URL for this charge.";
       }
@@ -229,13 +248,62 @@ export const action = async ({ request }) => {
 };
 
 export default function PlanPage() {
-  const { shop, subscription: loaderSub, chargeApproved, activatedPlan, activationRejected } =
-    useLoaderData();
+  const {
+    shop,
+    subscription: loaderSub,
+    chargeApproved,
+    activatedPlan,
+    activationRejected,
+    trial,
+    planTrialDays,
+  } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
   const currentPlan = fetcher.data?.subscription?.plan || loaderSub?.plan || "FREE";
   const [selectedPlan, setSelectedPlan] = useState(currentPlan);
+
+  /** Whether this tier is still being offered with a trial to *this* shop. */
+  const trialFor = (planKey) => (trial?.used ? 0 : planTrialDays?.[planKey] || 0);
+
+  /**
+   * The trial line on a plan card. A shop that has used its trial is told so
+   * rather than shown an offer it would not receive — the charge would come back
+   * with 0 trial days and the merchant would rightly call that a bait.
+   */
+  const trialNote = (planKey) => {
+    const days = planTrialDays?.[planKey] || 0;
+    if (!days) return null;
+
+    const available = !trial?.used;
+    return (
+      <div
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "6px",
+          marginBottom: "12px",
+          padding: "4px 10px",
+          borderRadius: "20px",
+          fontSize: "11px",
+          fontWeight: "700",
+          background: available ? "#dcfce7" : "#f1f5f9",
+          color: available ? "#15803d" : "#64748b",
+          border: `1px solid ${available ? "#a7f3d0" : "#e2e8f0"}`,
+        }}
+      >
+        {available ? `🎁 ${days}-DAY FREE TRIAL` : "FREE TRIAL ALREADY USED"}
+      </div>
+    );
+  };
+
+  /** Button copy: a trial on offer leads with the trial, not with the price. */
+  const cta = (planKey, fallback) => {
+    const days = trialFor(planKey);
+    return days ? `Start ${days}-day free trial` : fallback;
+  };
+
+  const trialEndsLabel = trial?.endsAt ? new Date(trial.endsAt).toLocaleDateString() : null;
 
   useEffect(() => {
     if (chargeApproved && activatedPlan) {
@@ -255,7 +323,11 @@ export default function PlanPage() {
   useEffect(() => {
     if (fetcher.data?.confirmationUrl) {
       const confirmUrl = fetcher.data.confirmationUrl;
-      shopify?.toast?.show?.("Redirecting to Shopify Billing...");
+      shopify?.toast?.show?.(
+        fetcher.data.trialDays > 0
+          ? `Redirecting to Shopify Billing — your first ${fetcher.data.trialDays} days are free.`
+          : "Redirecting to Shopify Billing..."
+      );
       if (window.top) {
         window.top.location.href = confirmUrl;
       } else {
@@ -349,11 +421,23 @@ export default function PlanPage() {
             {selectedPlan === "FREE" && "Up to 50 active items with basic tagging. Upgrade anytime to unlock automated hiding, restock delays & merchant email alerts."}
             {selectedPlan === "GROWTH" && "Up to 500 active items with auto-hiding, tagging, restock delay automation & merchant email notifications."}
             {selectedPlan === "PRO" && "Up to 5,000 items with AI Stockout Radar, storefront widget, safety stock rules & instant email alerts."}
-            {selectedPlan === "ENTERPRISE" && "Unlimited item capacity with custom vendor rules, dedicated support, real-time email & webhook triggers."}
+            {selectedPlan === "ENTERPRISE" && "Unlimited item capacity with custom vendor rules, dedicated support, real-time email, SMS & webhook triggers."}
           </p>
+          {trial?.active && trialEndsLabel && (
+            <p style={{ margin: "8px 0 0 0", fontSize: "12px", color: "#fde68a" }}>
+              You are on a free trial. Nothing has been charged yet — your first payment of $
+              {PLAN_PRICES[selectedPlan]} is taken on {trialEndsLabel}. Cancel before then and you pay
+              nothing.
+            </p>
+          )}
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+          {trial?.active && (
+            <span style={{ fontSize: "12px", background: "rgba(250, 204, 21, 0.18)", color: "#fde68a", padding: "6px 14px", borderRadius: "8px", border: "1px solid rgba(253, 230, 138, 0.35)", fontWeight: "700" }}>
+              🎁 Free trial — {trial.daysLeft} day{trial.daysLeft === 1 ? "" : "s"} left
+            </span>
+          )}
           <span style={{ fontSize: "12px", background: "rgba(16, 185, 129, 0.2)", color: "#34d399", padding: "6px 14px", borderRadius: "8px", border: "1px solid rgba(52, 211, 153, 0.3)", fontWeight: "600" }}>
             ✓ Shopify Billing Active
           </span>
@@ -367,7 +451,10 @@ export default function PlanPage() {
             Select the Best Plan for Your Store
           </h2>
           <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
-            Transparent pricing tailored to catalog size &amp; inventory automation needs. All paid plans include a 7-day free trial on Shopify, once per store.
+            Transparent pricing tailored to catalog size &amp; inventory automation needs.{" "}
+            {trial?.used
+              ? "This store has already used its free trial, so a plan change starts billing straight away."
+              : `Growth and Pro start with a ${trial?.trialDays || 7}-day free trial — you are not charged until it ends, and you can cancel any time. One trial per store.`}
           </p>
         </div>
 
@@ -475,6 +562,7 @@ export default function PlanPage() {
               <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
                 $9.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
               </div>
+              {trialNote("GROWTH")}
               <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
                 Best value for growing SMB stores wanting core automation &amp; auto-hiding.
               </p>
@@ -501,6 +589,9 @@ export default function PlanPage() {
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>30 days activity audit logs</span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>{planTrialDays?.GROWTH || 7}-day free trial</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Standard email support</span>
                   </li>
                 </ul>
@@ -517,7 +608,7 @@ export default function PlanPage() {
                 ? "Processing..."
                 : selectedPlan === "GROWTH"
                 ? "Current Active Plan"
-                : "Upgrade to Growth"}
+                : cta("GROWTH", "Upgrade to Growth")}
             </button>
           </div>
 
@@ -551,6 +642,7 @@ export default function PlanPage() {
               <div style={{ fontSize: "28px", fontWeight: "800", color: "#312e81", marginBottom: "8px" }}>
                 $19.99 <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: "500" }}>/month</span>
               </div>
+              {trialNote("PRO")}
               <p style={{ fontSize: "12px", color: "var(--text-muted)", minHeight: "36px", margin: "0 0 16px 0", lineHeight: "1.4" }}>
                 For expanding stores needing intelligence, Stockout Risk Radar &amp; theme widgets.
               </p>
@@ -580,6 +672,9 @@ export default function PlanPage() {
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>90 days activity audit logs</span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>{planTrialDays?.PRO || 7}-day free trial</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Priority email support</span>
                   </li>
                 </ul>
@@ -596,7 +691,7 @@ export default function PlanPage() {
                 ? "Processing..."
                 : selectedPlan === "PRO"
                 ? "Current Active Plan"
-                : "Upgrade to Pro"}
+                : cta("PRO", "Upgrade to Pro")}
             </button>
           </div>
 
@@ -642,6 +737,9 @@ export default function PlanPage() {
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Everything in Pro</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>SMS restock alerts (Twilio / Klaviyo)</strong></span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Custom lead-time rules per vendor</span>
@@ -692,6 +790,13 @@ export default function PlanPage() {
             </tr>
           </thead>
           <tbody>
+            <tr>
+              <td><strong>Free Trial</strong></td>
+              <td style={{ textAlign: "center", color: "#94a3b8" }}>n/a</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ {planTrialDays?.GROWTH || 7} days</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ {planTrialDays?.PRO || 7} days</td>
+              <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+            </tr>
             <tr>
               <td><strong>Catalog Active Items Limit</strong></td>
               <td style={{ textAlign: "center" }}>Up to 50</td>
@@ -746,6 +851,13 @@ export default function PlanPage() {
               <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
               <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
               <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+            </tr>
+            <tr>
+              <td><strong>SMS Restock Alerts (Twilio / Klaviyo)</strong></td>
+              <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+              <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+              <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
               <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
             </tr>
             <tr>

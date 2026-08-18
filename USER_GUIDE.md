@@ -67,7 +67,40 @@ Manage your store preferences, subscription plan, and support.
 
 - **General Preferences**: Adjust supplier lead times and default safety limits.
 - **Subscriptions & Plans**: View or upgrade your subscription plan (`Starter/Free`, `Growth`, `Pro`, `Enterprise`).
+- **SMS & Klaviyo**: Set up SMS restock notifications (Enterprise plan) — see below.
 - **Support & Help Desk**: Need assistance? Submit a support ticket directly from the app or email support at `sandeepptpss@gmail.com`.
+
+---
+
+### 6. 🎁 Free Trial (`/app/plan`)
+**Growth ($9.99/mo) and Pro ($19.99/mo) both start with a 7-day free trial.**
+
+- Pick Growth or Pro and approve the charge in Shopify. **Nothing is billed for 7 days** — Shopify itself holds the charge, and the Plan page shows exactly when your first payment is due.
+- Cancel any time before the trial ends by switching back to **Starter / Free**, and you pay nothing.
+- All the plan's features are live from the first minute of the trial.
+- One trial per store: once a store has had its free week, later plan changes start billing immediately. The Plan page says so plainly rather than offering a trial it cannot grant.
+- Enterprise ($49.99/mo) does not include a self-serve trial — [talk to us](mailto:sandeepptpss@gmail.com) instead.
+
+---
+
+### 7. 📱 SMS Restock Alerts via Twilio or Klaviyo (Enterprise)
+Text a waiting customer the moment their item is back. Available on the **Enterprise** plan, in **Settings → SMS & Klaviyo**.
+
+**Setting it up**
+
+1. Go to **Settings → SMS & Klaviyo** and tick **Send SMS restock notifications**.
+2. Choose your provider:
+   - **Twilio** — StockShield sends the text itself. Paste your **Account SID**, **Auth Token** and either a purchased **sender number** or a **Messaging Service SID** (`MG…`).
+   - **Klaviyo** — StockShield hands the event to Klaviyo and *your flow* sends the text. Paste your **private API key** (profile + event write scopes), and optionally an **SMS list ID** so customer consent is recorded for you.
+3. Set your **default country code** — this is applied to numbers a customer types without one, e.g. `555 010 9999`.
+4. Write your **message template**. Placeholders: `{{product}}`, `{{variant}}`, `{{url}}`, `{{shop}}`. The page previews the message and tells you how many SMS segments it will be billed as.
+5. Save, then **send a test message to your own phone**. The test goes down exactly the same path as a real alert, so if it arrives, customers' will too.
+
+**Using Klaviyo?** Klaviyo has no "send now" API — it sends from flows. Build a flow triggered by the metric named in your settings (default: *StockShield Back in Stock*), add an SMS step, and use the `sms_message` event property for the copy (or `product_title` / `product_url` to write your own). Until that flow is live, StockShield will report the event as accepted and no text will go out.
+
+**What your customers see**: once SMS is on, the storefront *"Notify me when back in stock"* form gains an optional mobile number field alongside the email box, with your consent wording underneath. They can leave an email, a number, or both — and they are alerted on whichever they gave.
+
+**Costs and control**: messages are sent from *your* Twilio or Klaviyo account and billed to you, never through StockShield. Switching SMS off removes the phone field from your storefront and stops every message; waiting subscribers keep their place in the queue. The same happens automatically if you leave the Enterprise plan.
 
 ---
 
@@ -87,6 +120,12 @@ Manage your store preferences, subscription plan, and support.
 
 #### Q4b: Do I need to configure anything inside the "Stock Control Embed" block?
 > **No.** The embed has no settings of its own — switching it ON is the only step. Auto-hide, visibility mode, tags, restock timers and the low-stock badge are all configured in **Automation Rules** (`/app/rules`), so your settings survive a theme switch or theme duplicate instead of resetting.
+
+#### Q4c: Why has the mobile number field disappeared from my "Notify Me" form?
+> The field only appears while SMS notifications are switched on **and** your store is on the Enterprise plan. Both are checked on the storefront itself, so a downgrade removes the field automatically rather than collecting numbers you could not text.
+
+#### Q4d: Do I get charged as soon as I start a trial?
+> **No.** Shopify holds the charge for the whole 7 days. The Plan page and your dashboard both show how many days are left and the exact date of the first payment. Switch back to Starter / Free before that date and you are not billed at all.
 
 #### Q5: Can I keep products visible and ONLY apply out-of-stock tags?
 > **Yes!** Go to **Automation Rules** (`/app/rules`), and set **Visibility Mode Action** to **TAG_ONLY** (or uncheck *"Auto-Hide Storefront Action"*). This keeps sold-out products active on your storefront while applying `out-of-stock` tags for your theme.

@@ -15,7 +15,7 @@ import {
   hasSuccessfulAutomation,
   updateInventorySettings,
 } from "../models/inventory.server";
-import { checkPlanLimitStatus } from "../utils/planLimits";
+import { checkPlanLimitStatus, trialStatus, PLAN_NAMES, PLAN_PRICES, TRIAL_DAYS } from "../utils/planLimits";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -65,6 +65,7 @@ export const loader = async ({ request }) => {
     chargeApproved: chargeApproved === "true",
     activatedPlan,
     hasAutomationSuccess,
+    trial: trialStatus(subscription),
   };
 };
 
@@ -120,7 +121,7 @@ export const action = async ({ request }) => {
 };
 
 export default function Dashboard() {
-  const { shop, items, settings, primaryLocationId, recentLogs, subscription, chargeApproved, activatedPlan, hasAutomationSuccess } = useLoaderData();
+  const { shop, items, settings, primaryLocationId, recentLogs, subscription, chargeApproved, activatedPlan, hasAutomationSuccess, trial } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -410,6 +411,71 @@ export default function Dashboard() {
           </fetcher.Form>
         </div>
       </div>
+
+      {/* Free Trial Countdown / Offer */}
+      {(trial?.active || (subscription?.plan === "FREE" && !trial?.used)) && (
+        <div
+          style={{
+            background: "#ffffff",
+            border: "1px solid #ddd6fe",
+            borderLeft: "4px solid #4f46e5",
+            borderRadius: "12px",
+            padding: "16px 20px",
+            marginBottom: "20px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            boxShadow: "var(--shadow-xs)",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div
+              style={{
+                width: "36px",
+                height: "36px",
+                borderRadius: "10px",
+                background: "#eef2ff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+                fontSize: "18px",
+              }}
+            >
+              🎁
+            </div>
+            <div>
+              <h3 style={{ margin: "0 0 2px 0", fontSize: "14px", color: "#0f172a", fontWeight: "700" }}>
+                {trial?.active
+                  ? `Free trial — ${trial.daysLeft} day${trial.daysLeft === 1 ? "" : "s"} left`
+                  : `Try ${PLAN_NAMES.GROWTH} or ${PLAN_NAMES.PRO} free for ${TRIAL_DAYS} days`}
+              </h3>
+              <p style={{ margin: 0, fontSize: "12px", color: "#64748b" }}>
+                {trial?.active
+                  ? `You are on ${PLAN_NAMES[trial.plan] || trial.plan} at no charge. Your first payment of $${PLAN_PRICES[trial.plan]} is taken on ${new Date(trial.endsAt).toLocaleDateString()} — cancel before then and you pay nothing.`
+                  : `Auto-hiding, auto-publishing, restock delays and email alerts, free for ${TRIAL_DAYS} days. No charge until the trial ends, and you can cancel any time.`}
+              </p>
+            </div>
+          </div>
+          <Link
+            to="/app/plan"
+            className="btn-primary"
+            style={{
+              background: "#4f46e5",
+              color: "#ffffff",
+              textDecoration: "none",
+              padding: "7px 16px",
+              fontSize: "12px",
+              fontWeight: "600",
+              borderRadius: "8px",
+            }}
+          >
+            {trial?.active ? "Manage plan →" : `Start ${TRIAL_DAYS}-day free trial →`}
+          </Link>
+        </div>
+      )}
 
       {/* Plan Limit Exceeded Pro Upgrade Banner */}
       {isBreached && (

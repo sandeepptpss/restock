@@ -30,6 +30,27 @@ export const PLAN_PRICES = {
   ENTERPRISE: 49.99,
 };
 
+/** The trial every eligible plan is offered, in days. */
+export const TRIAL_DAYS = 7;
+
+/**
+ * How many free trial days each plan is sold with.
+ *
+ * The trial exists to move a Starter merchant onto a paid tier, so it is offered
+ * on the two plans that conversion actually runs through — Growth and Pro.
+ * Enterprise is bought after a conversation, not out of a self-serve trial, and a
+ * zero here is what keeps the $49.99 tier from being taken for a free week.
+ *
+ * Read by the Plan page (the badges, the button copy) and by the charge itself, so
+ * a tier advertised with a trial is charged with one and a tier without cannot be.
+ */
+export const PLAN_TRIAL_DAYS = {
+  FREE: 0,
+  GROWTH: TRIAL_DAYS,
+  PRO: TRIAL_DAYS,
+  ENTERPRISE: 0,
+};
+
 /**
  * Every gated capability, and which plans include it.
  *
@@ -53,6 +74,7 @@ export const PLAN_MATRIX = {
       purchaseOrders: false,
       vendorRules: false,
       webhookAlerts: false,
+      smsAlerts: false,
     },
   },
   GROWTH: {
@@ -72,6 +94,7 @@ export const PLAN_MATRIX = {
       purchaseOrders: false,
       vendorRules: false,
       webhookAlerts: false,
+      smsAlerts: false,
     },
   },
   PRO: {
@@ -91,6 +114,7 @@ export const PLAN_MATRIX = {
       purchaseOrders: true,
       vendorRules: false,
       webhookAlerts: false,
+      smsAlerts: false,
     },
   },
   ENTERPRISE: {
@@ -110,6 +134,7 @@ export const PLAN_MATRIX = {
       purchaseOrders: true,
       vendorRules: true,
       webhookAlerts: true,
+      smsAlerts: true,
     },
   },
 };
@@ -132,6 +157,7 @@ export const FEATURE_LABELS = {
   purchaseOrders: "Supplier Purchase Orders (POs)",
   vendorRules: "Custom lead-time rules per vendor",
   webhookAlerts: "Real-time webhook alerts",
+  smsAlerts: "SMS restock notifications via Twilio or Klaviyo",
 };
 
 /**
@@ -194,7 +220,55 @@ export function getPlan(plan) {
     logRetentionDays: entry.logRetentionDays,
     support: entry.support,
     supportResponse: entry.supportResponse,
+    trialDays: PLAN_TRIAL_DAYS[planKey] || 0,
     features: { ...entry.features },
+  };
+}
+
+/** Whether a plan is sold with a free trial at all. */
+export function planOffersTrial(plan) {
+  return (PLAN_TRIAL_DAYS[normalizePlan(plan)] || 0) > 0;
+}
+
+/**
+ * The trial length to ask Shopify for when starting a subscription.
+ *
+ * `trialDays` on appSubscriptionCreate applies to *each* subscription Shopify
+ * creates, so a shop that has already had its trial must be charged with 0 — else
+ * cycling Growth → Starter → Growth renews the free week forever. The trial is
+ * therefore per shop, and the plan only decides whether one is on offer.
+ */
+export function trialDaysFor(plan, subscription = null) {
+  if (subscription?.trialUsed) return 0;
+  return PLAN_TRIAL_DAYS[normalizePlan(plan)] || 0;
+}
+
+/**
+ * What the merchant should be told about their trial, derived from the stored
+ * subscription record.
+ *
+ * `trialEndsAt` is written from Shopify's own billing record (createdAt + the
+ * granted trialDays), so "4 days left" is Shopify's clock, not a guess made when
+ * the merchant happened to click Upgrade.
+ */
+export function trialStatus(subscription, now = Date.now()) {
+  const plan = normalizePlan(subscription?.plan);
+  const used = Boolean(subscription?.trialUsed);
+  const endsAtMs = subscription?.trialEndsAt ? new Date(subscription.trialEndsAt).getTime() : NaN;
+  const hasEnd = Number.isFinite(endsAtMs);
+  const active = hasEnd && endsAtMs > now && plan !== "FREE";
+
+  return {
+    plan,
+    used,
+    active,
+    endsAt: hasEnd ? new Date(endsAtMs).toISOString() : null,
+    // Rounded up, so the last partial day still reads as "1 day left" rather than 0.
+    daysLeft: active ? Math.max(1, Math.ceil((endsAtMs - now) / 86400000)) : 0,
+    // What a trial is still available on. Empty once the shop has used theirs, which
+    // is what stops the pricing table promising a free week it will not grant.
+    eligiblePlans: used ? [] : PLAN_ORDER.filter((key) => PLAN_TRIAL_DAYS[key] > 0),
+    trialDays: TRIAL_DAYS,
   };
 }
 
@@ -228,6 +302,9 @@ export function applyPlanToSettings(settings, plan) {
     restockDelayValue: features.restockDelay ? settings.restockDelayValue : 0,
     restockDelayUnit: features.restockDelay ? settings.restockDelayUnit : "IMMEDIATE",
     enableEmailAlerts: features.emailAlerts && settings.enableEmailAlerts !== false,
+    // Opt-in rather than default-on: SMS costs the merchant money per message and
+    // needs credentials before it can send anything at all.
+    enableSmsAlerts: features.smsAlerts && Boolean(settings.enableSmsAlerts),
     // A tier without auto-hide can still tag, so the visibility mode is pinned to
     // the tag-only behaviour rather than left pointing at DRAFT or UNLISTED.
     visibilityMode: features.autoHide ? settings.visibilityMode : "TAG_ONLY",

@@ -23,6 +23,18 @@
     assign ss_restock_widget = true
   endif
 
+  comment
+    Whether to ask for a mobile number as well. The dashboard publishes smsOptIn
+    only when the plan includes SMS *and* the merchant switched it on, so this
+    field disappears from the storefront by itself on a downgrade — the same
+    reason restockWidget is published rather than assumed. The theme setting can
+    only take the field away, never add one the shop cannot send to.
+  endcomment
+  assign ss_collect_phone = false
+  if ss_config and ss_config.smsOptIn and block.settings.collect_phone != false
+    assign ss_collect_phone = true
+  endif
+
   assign has_sold_out_variant = false
   if product and product.variants
     for v in product.variants
@@ -162,6 +174,33 @@
             {{ btn_text }}
           </button>
         </div>
+
+        {% if ss_collect_phone %}
+          <div style="margin-top: 10px;">
+            <input
+              type="tel"
+              id="stock-notify-phone"
+              placeholder="{{ block.settings.phone_placeholder | default: 'Mobile number for an SMS alert (optional)' }}"
+              style="
+                width: 100%;
+                height: 44px;
+                padding: 0 14px;
+                border: 1px solid #cbd5e1;
+                border-radius: {{ border_radius }}px;
+                font-size: 14px;
+                outline: none;
+                background: #ffffff;
+                color: #0f172a;
+                box-sizing: border-box;
+              "
+              onfocus="this.style.borderColor='{{ btn_bg }}';"
+              onblur="this.style.borderColor='#cbd5e1';"
+            />
+            <p style="margin: 6px 0 0 0; font-size: 11.5px; color: #64748b; line-height: 1.4;">
+              {{ block.settings.sms_consent_text | default: "By adding your number you agree to receive a text message about this item. Message and data rates may apply." }}
+            </p>
+          </div>
+        {% endif %}
 
         <div id="stock-notify-msg" style="display: none; margin-top: 12px; padding: 10px 14px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; font-size: 13px; color: #166534; font-weight: 600; line-height: 1.4;">
           Thank you! We will notify you when this item is back in stock.
@@ -357,6 +396,38 @@
                 onblur="this.style.borderColor='#cbd5e1'; this.style.boxShadow='none';"
               />
             </div>
+
+            <!-- Mobile Number (SMS alerts) -->
+            {% if ss_collect_phone %}
+              <div style="margin-bottom: 14px;">
+                <label style="display: block; font-size: 13px; font-weight: 600; color: #334155; margin-bottom: 6px;">
+                  Mobile Number <span style="font-weight: 500; color: #94a3b8;">(optional — get a text)</span>
+                </label>
+                <input
+                  type="tel"
+                  id="stock-notify-modal-phone"
+                  placeholder="{{ block.settings.phone_placeholder | default: '+1 415 555 0123' }}"
+                  style="
+                    width: 100%;
+                    height: 44px;
+                    padding: 0 14px;
+                    border: 1.5px solid #cbd5e1;
+                    border-radius: {{ border_radius }}px;
+                    font-size: 14px;
+                    outline: none;
+                    background: #ffffff;
+                    color: #0f172a;
+                    box-sizing: border-box;
+                    transition: border-color 0.2s, box-shadow 0.2s;
+                  "
+                  onfocus="this.style.borderColor='{{ btn_bg }}'; this.style.boxShadow='0 0 0 3px {{ btn_bg }}22';"
+                  onblur="this.style.borderColor='#cbd5e1'; this.style.boxShadow='none';"
+                />
+                <p style="margin: 6px 0 0 0; font-size: 11.5px; color: #64748b; line-height: 1.4;">
+                  {{ block.settings.sms_consent_text | default: "By adding your number you agree to receive a text message about this item. Message and data rates may apply." }}
+                </p>
+              </div>
+            {% endif %}
 
             <!-- Variant Option Selector -->
             {% if block.settings.show_variant_select != false and product.variants.size > 1 %}
@@ -751,16 +822,42 @@
       doFetch(STOCK_NOTIFY_ENDPOINT, false);
     }
 
+    /**
+     * What the customer has to fill in. With the SMS field on the form, either an
+     * email address or a mobile number is enough — insisting on both would cost the
+     * merchant subscribers, and insisting on the address alone would make the number
+     * field look decorative.
+     */
+    function validateNotifyContact(email, phone, hasPhoneField) {
+      if (!email && (!hasPhoneField || !phone)) {
+        return hasPhoneField
+          ? 'Enter your email address or mobile number.'
+          : 'Please enter a valid email address.';
+      }
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+        return 'Please enter a valid email address.';
+      }
+      // Only the loosest check here — the server normalizes against the store's
+      // dialling code, which is the only place that code is known.
+      if (!email && phone && phone.replace(/\D/g, '').length < 7) {
+        return 'Enter a mobile number with your country code, e.g. +1 415 555 0123.';
+      }
+      return null;
+    }
+
     function submitStockNotifyInline() {
       var emailInput = document.getElementById('stock-notify-email');
+      var phoneInput = document.getElementById('stock-notify-phone');
       var variantSelect = document.getElementById('stock-notify-inline-variant');
       var btn = document.getElementById('stock-notify-btn');
       var msg = document.getElementById('stock-notify-msg');
       var err = document.getElementById('stock-notify-error');
 
       var email = emailInput ? emailInput.value.trim() : '';
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
-        if (err) { err.textContent = 'Please enter a valid email address.'; err.style.display = 'block'; }
+      var phone = phoneInput ? phoneInput.value.trim() : '';
+      var contactError = validateNotifyContact(email, phone, Boolean(phoneInput));
+      if (contactError) {
+        if (err) { err.textContent = contactError; err.style.display = 'block'; }
         if (msg) msg.style.display = 'none';
         return;
       }
@@ -774,6 +871,7 @@
       var payload = {
         shop: shop,
         email: email,
+        phone: phone,
         productId: 'gid://shopify/Product/' + data.productId,
         productTitle: data.productTitle || '',
         variantId: chosenVariant.id ? 'gid://shopify/ProductVariant/' + chosenVariant.id : '',
@@ -786,9 +884,16 @@
           if (err) err.style.display = 'none';
           if (btn) { btn.innerText = 'Subscribing...'; btn.disabled = true; btn.style.opacity = '0.7'; }
         },
-        function() {
-          if (msg) msg.style.display = 'block';
+        function(body) {
+          if (msg) {
+            // The server says which channel the subscription actually landed on — a
+            // number can be dropped if the store cannot text it, and the customer
+            // should not be told they will get an SMS in that case.
+            if (body && body.message) msg.textContent = body.message;
+            msg.style.display = 'block';
+          }
           if (emailInput) emailInput.value = '';
+          if (phoneInput) phoneInput.value = '';
           if (btn) { btn.innerText = 'Subscribed ✓'; btn.style.background = '#16a34a'; btn.style.opacity = '1'; }
         },
         function(errorText) {
@@ -800,14 +905,17 @@
 
     function submitStockNotifyModal() {
       var emailInput = document.getElementById('stock-notify-modal-email');
+      var phoneInput = document.getElementById('stock-notify-modal-phone');
       var variantSelect = document.getElementById('stock-notify-modal-variant');
       var submitBtn = document.getElementById('stock-notify-modal-submit');
       var msg = document.getElementById('stock-notify-modal-msg');
       var err = document.getElementById('stock-notify-modal-error');
 
       var email = emailInput ? emailInput.value.trim() : '';
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
-        if (err) { err.textContent = 'Please enter a valid email address.'; err.style.display = 'block'; }
+      var phone = phoneInput ? phoneInput.value.trim() : '';
+      var contactError = validateNotifyContact(email, phone, Boolean(phoneInput));
+      if (contactError) {
+        if (err) { err.textContent = contactError; err.style.display = 'block'; }
         if (msg) msg.style.display = 'none';
         return;
       }
@@ -821,6 +929,7 @@
       var payload = {
         shop: shop,
         email: email,
+        phone: phone,
         productId: 'gid://shopify/Product/' + data.productId,
         productTitle: data.productTitle || '',
         variantId: chosenVariant.id ? 'gid://shopify/ProductVariant/' + chosenVariant.id : '',
@@ -833,9 +942,13 @@
           if (err) err.style.display = 'none';
           if (submitBtn) { submitBtn.innerText = 'Submitting...'; submitBtn.disabled = true; submitBtn.style.opacity = '0.7'; }
         },
-        function() {
-          if (msg) msg.style.display = 'block';
+        function(body) {
+          if (msg) {
+            if (body && body.message) msg.textContent = '✓ ' + body.message;
+            msg.style.display = 'block';
+          }
           if (emailInput) emailInput.value = '';
+          if (phoneInput) phoneInput.value = '';
           if (submitBtn) { submitBtn.innerHTML = '<span>Subscribed! ✓</span>'; submitBtn.style.background = '#16a34a'; submitBtn.style.opacity = '1'; }
           setTimeout(function() { closeStockNotifyModal(); }, 1800);
         },
@@ -948,6 +1061,29 @@
       "id": "show_variant_select",
       "label": "Show Variant Selector Dropdown",
       "default": true
+    },
+    {
+      "type": "header",
+      "content": "SMS Alerts (Enterprise plan)"
+    },
+    {
+      "type": "checkbox",
+      "id": "collect_phone",
+      "label": "Ask for a mobile number",
+      "info": "Only appears when SMS restock notifications are switched on in the StockShield dashboard.",
+      "default": true
+    },
+    {
+      "type": "text",
+      "id": "phone_placeholder",
+      "label": "Mobile Number Placeholder",
+      "default": "+1 415 555 0123"
+    },
+    {
+      "type": "text",
+      "id": "sms_consent_text",
+      "label": "SMS Consent Text",
+      "default": "By adding your number you agree to receive a text message about this item. Message and data rates may apply."
     }
   ]
 }

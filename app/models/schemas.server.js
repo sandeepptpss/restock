@@ -88,6 +88,27 @@ const inventorySettingsSchema = new Schema(
     leadTimeDays: { type: Number, default: 14 },
     targetStockDays: { type: Number, default: 30 },
     reviewPromptDismissed: { type: Boolean, default: false },
+    // SMS restock notifications (Enterprise). Credentials are per shop because the
+    // messages are sent from the merchant's own Twilio or Klaviyo account and billed
+    // to them; the env vars are only a fallback for a single-tenant deployment.
+    enableSmsAlerts: { type: Boolean, default: false },
+    smsProvider: { type: String, default: "TWILIO" }, // TWILIO | KLAVIYO
+    twilioAccountSid: { type: String, default: "" },
+    twilioAuthToken: { type: String, default: "" },
+    twilioFromNumber: { type: String, default: "" },
+    klaviyoApiKey: { type: String, default: "" },
+    // Optional. Given a list id, a subscriber's SMS consent is recorded against it
+    // in Klaviyo before the event is pushed, which is what makes the number
+    // messageable by a flow.
+    klaviyoSmsListId: { type: String, default: "" },
+    klaviyoMetricName: { type: String, default: "StockShield Back in Stock" },
+    // Numbers a storefront visitor types are usually national ("07700 900123"), so
+    // an assumed dialling code is what turns them into something sendable.
+    smsDefaultCountryCode: { type: String, default: "+1" },
+    smsRestockTemplate: {
+      type: String,
+      default: "{{product}} is back in stock at {{shop}}. Get it here: {{url}}",
+    },
   },
   { ...timestamps, collection: "inventorysettings" }
 );
@@ -196,6 +217,14 @@ const subscriptionSchema = new Schema(
     // Set once a paid subscription is confirmed, so the 7-day trial is granted per
     // shop rather than per subscription — otherwise cycling plans renews it forever.
     trialUsed: { type: Boolean, default: false },
+    // When the granted trial runs out, taken from Shopify's billing record
+    // (subscription createdAt + the trialDays Shopify actually applied) rather than
+    // computed at click time, so the countdown the merchant sees is the one they
+    // will be charged by. Null means no trial is running.
+    trialEndsAt: { type: Date, default: null },
+    // Which plan the running trial belongs to, so a trial started on Growth is not
+    // reported against a plan the merchant has since moved to.
+    trialPlan: { type: String, default: null },
   },
   { timestamps: { createdAt: true, updatedAt: false }, collection: "subscriptions" }
 );
@@ -281,7 +310,12 @@ supportTicketSchema.index({ ticketId: 1 }, { unique: true });
 const backInStockSubscriberSchema = new Schema(
   {
     shop: { type: String, required: true, index: true },
-    email: { type: String, required: true },
+    // Not required any more: an SMS-only subscriber gives a number and no address,
+    // and a required email would reject the whole subscription. `channel` records
+    // which of the two the customer actually asked to be reached on.
+    email: { type: String, default: "" },
+    phone: { type: String, default: "" },
+    channel: { type: String, default: "EMAIL" }, // EMAIL | SMS | BOTH
     productId: { type: String, required: true },
     productTitle: { type: String, default: "" },
     variantId: { type: String, default: "" },
