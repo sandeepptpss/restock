@@ -186,7 +186,25 @@ export default function StockRadar() {
           <h1>Stockout Risk Radar &amp; Forecast Engine</h1>
           <p>Predictive inventory run-rate analytics, days of supply remaining &amp; supplier reorder recommendations</p>
         </div>
-        <button className="btn-primary" onClick={exportCSV} style={{ background: "#059669" }}>
+        <button
+          className="btn-primary"
+          onClick={exportCSV}
+          style={{
+            background: "#ffffff",
+            color: "#0f172a",
+            border: "none",
+            padding: "10px 20px",
+            borderRadius: "8px",
+            fontWeight: "700",
+            fontSize: "13px",
+            cursor: "pointer",
+            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.15)",
+            transition: "all 0.15s ease",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
+        >
           Export Reorder Sheet (CSV)
         </button>
       </div>

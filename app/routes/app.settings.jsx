@@ -207,7 +207,7 @@ export const action = async ({ request }) => {
     const supplierEmail = formData.get("supplierEmail") || "";
     const itemsJson = formData.get("items") || "[]";
     let items = [];
-    try { items = JSON.parse(itemsJson); } catch (e) {}
+    try { items = JSON.parse(itemsJson); } catch (e) { }
 
     const po = await createPurchaseOrder(session.shop, { supplierName, supplierEmail, items });
     const purchaseOrders = await getPurchaseOrders(session.shop, 50);
@@ -310,7 +310,7 @@ export const action = async ({ request }) => {
         ? `SMS alerts are on via ${config.provider}.${config.ready ? "" : ` Not sending yet — missing: ${config.missing.join(", ")}.`}`
         : "SMS alerts are off; the storefront form has stopped asking for phone numbers.",
       status: updated.enableSmsAlerts && !config.ready ? "PARTIAL" : "SUCCESS",
-    }).catch(() => {});
+    }).catch(() => { });
 
     return {
       success: true,
@@ -365,7 +365,7 @@ export const action = async ({ request }) => {
 
     const updated = await updateInventorySettings(session.shop, emailData);
 
-    return { success: true, settings: updated, type: "save_email_settings" };
+    return { success: true, settings: updated, type: "save_email_settings", message: "Email settings saved" };
   }
 
   if (intent === "dispatch_restock_alert") {
@@ -392,9 +392,8 @@ export const action = async ({ request }) => {
         success: true,
         type: "dispatch_alert",
         subscribers: updatedSubscribers,
-        message: `Restock alert sent to ${recipient} by ${(result.sentOn || ["email"]).join(" and ")}!${
-          result.error ? ` One channel failed: ${result.error}` : ""
-        }`,
+        message: `Restock alert sent to ${recipient} by ${(result.sentOn || ["email"]).join(" and ")}!${result.error ? ` One channel failed: ${result.error}` : ""
+          }`,
       };
     } else {
       return {
@@ -427,7 +426,7 @@ export const action = async ({ request }) => {
   // theme app embed reads, so the storefront's copy has to follow the save.
   await syncStorefrontConfig(admin, session.shop);
 
-  return { success: true, settings: updated };
+  return { success: true, settings: updated, type: "save_thresholds", message: "Threshold settings saved" };
 };
 
 
@@ -451,7 +450,12 @@ function PlanLockedPanel({ gate, title, description, bullets = [] }) {
         border: "1px solid #c7d2fe",
       }}
     >
-      <div style={{ fontSize: "34px", marginBottom: "10px" }}>🔒</div>
+      <div style={{ marginBottom: "12px" }}>
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+      </div>
 
       <h2 style={{ fontSize: "20px", margin: "0 0 6px 0", color: "#1e1b4b" }}>{title}</h2>
       <p style={{ margin: "0 auto 20px auto", fontSize: "13px", color: "#4c1d95", maxWidth: "560px", lineHeight: 1.5 }}>
@@ -472,7 +476,7 @@ function PlanLockedPanel({ gate, title, description, bullets = [] }) {
         >
           {bullets.map((bullet) => (
             <li key={bullet} style={{ display: "flex", gap: "8px", fontSize: "13px", color: "#3730a3" }}>
-              <span style={{ color: "#4f46e5", fontWeight: "bold" }}>✓</span>
+              <span style={{ color: "#4f46e5", fontWeight: "bold" }}>•</span>
               <span>{bullet}</span>
             </li>
           ))}
@@ -566,6 +570,7 @@ export default function Settings() {
   const [emailAlertsEnabled, setEmailAlertsEnabled] = useState(settings?.enableEmailAlerts !== false);
   const [notifyStockout, setNotifyStockout] = useState(settings?.notifyOnStockout !== false);
   const [notifyRestock, setNotifyRestock] = useState(settings?.notifyOnRestock !== false);
+  const [successBanner, setSuccessBanner] = useState("");
 
   useEffect(() => {
     if (settings) {
@@ -578,8 +583,24 @@ export default function Settings() {
   const isSendingSupport = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "send_support_request";
 
   useEffect(() => {
+    if (fetcher.data?.type === "save_thresholds" && fetcher.data?.success) {
+      const msg = fetcher.data.message || "Threshold settings saved";
+      shopify?.toast?.show?.(msg);
+      setSuccessBanner(msg);
+    }
+    if (fetcher.data?.type === "save_email_settings" && fetcher.data?.success) {
+      const msg = fetcher.data.message || "Email settings saved";
+      shopify?.toast?.show?.(msg);
+      setSuccessBanner(msg);
+    }
+    if (fetcher.data?.type === "save_sms_settings" && fetcher.data?.success) {
+      const msg = fetcher.data.message || "SMS settings saved";
+      shopify?.toast?.show?.(msg);
+      setSuccessBanner(msg);
+    }
     if (fetcher.data?.type === "support" && fetcher.data?.success) {
       shopify?.toast?.show?.(`Support ticket ${fetcher.data.ticket?.ticketId || ""} submitted!`);
+      setSuccessBanner(`Support ticket ${fetcher.data.ticket?.ticketId || ""} submitted successfully!`);
       setLastTicket(fetcher.data.ticket);
       setSupportName("");
       setSupportEmail("");
@@ -587,21 +608,24 @@ export default function Settings() {
     }
     if (fetcher.data?.type === "ticket_reply" && fetcher.data?.success) {
       shopify?.toast?.show?.("Solution saved & ticket updated!");
+      setSuccessBanner("Solution saved & ticket updated successfully!");
       setActiveTicket(null);
       setReplyText("");
     }
-    // The action refuses a gated write even when the UI let the form through —
-    // a stale tab left open across a downgrade, say. Surface it rather than
-    // leaving the merchant looking at a form that quietly did nothing.
     if (fetcher.data?.type === "dispatch_alert") {
       if (fetcher.data?.success) {
-        shopify?.toast?.show?.(fetcher.data.message || "Restock alert email sent successfully!");
+        const msg = fetcher.data.message || "Restock alert email sent successfully!";
+        shopify?.toast?.show?.(msg);
+        setSuccessBanner(msg);
       } else {
         shopify?.toast?.show?.(fetcher.data.message || "Failed to send restock alert email.", { isError: true });
       }
     }
-    if (fetcher.data?.type === "save_sms_settings" || fetcher.data?.type === "send_test_sms") {
+    if (fetcher.data?.type === "send_test_sms") {
       shopify?.toast?.show?.(fetcher.data.message, { isError: !fetcher.data.success });
+      if (fetcher.data.success) {
+        setSuccessBanner(fetcher.data.message);
+      }
     }
     if (fetcher.data?.type === "ticket_reply_failed") {
       shopify?.toast?.show?.(fetcher.data.message, { isError: true });
@@ -644,6 +668,47 @@ export default function Settings() {
         <span className="stock-badge-active">Connected: {shop}</span>
       </div>
 
+      {/* Save Success Banner Notification */}
+      {successBanner && (
+        <div
+          className="table-card"
+          style={{
+            padding: "14px 20px",
+            marginBottom: "24px",
+            background: "linear-gradient(135deg, #dcfce7 0%, #f0fdf4 100%)",
+            border: "1px solid #86efac",
+            borderRadius: "12px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            boxShadow: "0 4px 12px rgba(22, 163, 74, 0.12)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", color: "#15803d", fontWeight: "600", fontSize: "14px" }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+              <polyline points="22 4 12 14.01 9 11.01"></polyline>
+            </svg>
+            <span>{successBanner}</span>
+          </div>
+          <button
+            onClick={() => setSuccessBanner("")}
+            type="button"
+            style={{
+              background: "none",
+              border: "none",
+              color: "#15803d",
+              fontSize: "16px",
+              cursor: "pointer",
+              fontWeight: "bold",
+              padding: "4px 8px",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* 5-Star Review Prompt Engine Banner */}
       {actionCount >= 5 && !settings?.reviewPromptDismissed && (
         <div
@@ -664,7 +729,7 @@ export default function Settings() {
         >
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
-              <span style={{ fontSize: "18px" }}>⭐ ⭐ ⭐ ⭐ ⭐</span>
+              <span style={{ color: "#d97706", fontSize: "14px", fontWeight: "bold" }}>★★★★★</span>
               <h3 style={{ margin: 0, fontSize: "16px", color: "#92400e", fontWeight: "700" }}>
                 StockShield Automated {actionCount}+ Inventory Actions!
               </h3>
@@ -691,7 +756,7 @@ export default function Settings() {
                 borderRadius: "8px",
               }}
             >
-              Leave 5-Star Review ⭐
+              Leave 5-Star Review
             </a>
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="dismiss_review_prompt" />
@@ -718,6 +783,7 @@ export default function Settings() {
         }}
       >
         <button
+          type="button"
           onClick={() => setActiveTab("general")}
           style={{
             padding: "10px 18px",
@@ -734,6 +800,7 @@ export default function Settings() {
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab("po")}
           style={{
             padding: "10px 18px",
@@ -749,7 +816,7 @@ export default function Settings() {
             gap: "6px",
           }}
         >
-          Purchase Orders (POs) {poGate.allowed ? "📄" : "🔒"}
+          Purchase Orders (POs)
           {poGate.allowed && posList.length > 0 && (
             <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {posList.length}
@@ -758,6 +825,7 @@ export default function Settings() {
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab("subscribers")}
           style={{
             padding: "10px 18px",
@@ -773,7 +841,7 @@ export default function Settings() {
             gap: "6px",
           }}
         >
-          Customer Restock Alerts {restockGate.allowed ? "📩" : "🔒"}
+          Customer Restock Alerts
           {restockGate.allowed && subscribersList.length > 0 && (
             <span style={{ background: "#fef3c7", color: "#92400e", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {subscribersList.length}
@@ -782,6 +850,7 @@ export default function Settings() {
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab("sms")}
           style={{
             padding: "10px 18px",
@@ -797,7 +866,7 @@ export default function Settings() {
             gap: "6px",
           }}
         >
-          SMS &amp; Klaviyo {smsGate.allowed ? "📱" : "🔒"}
+          SMS &amp; Klaviyo
           {smsGate.allowed && smsSettings?.enableSmsAlerts && (
             <span
               style={{
@@ -815,6 +884,7 @@ export default function Settings() {
         </button>
 
         <button
+          type="button"
           onClick={() => setActiveTab("support")}
           style={{
             padding: "10px 18px",
@@ -830,7 +900,7 @@ export default function Settings() {
             gap: "6px",
           }}
         >
-          Support &amp; Help Desk 🎧
+          Support &amp; Help Desk
           {tickets.length > 0 && (
             <span style={{ background: "#e0e7ff", color: "#3730a3", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {tickets.length}
@@ -1236,8 +1306,8 @@ export default function Settings() {
               </div>
 
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <button type="submit" className="btn-primary" style={{ background: "#4f46e5" }}>
-                  📄 Generate Purchase Order (PO)
+                <button type="submit" className="btn-primary" style={{ background: "#312e81" }}>
+                  Generate Purchase Order (PO)
                 </button>
               </div>
             </fetcher.Form>
@@ -1276,21 +1346,50 @@ export default function Settings() {
                       <td style={{ fontWeight: "600" }}>{po.supplierName}</td>
                       <td>{po.supplierEmail || "N/A"}</td>
                       <td>{po.totalItems || po.items?.length || 1} Item(s)</td>
-                      <td>
-                        {po.status === "DRAFT" && <span className="badge badge-warning">Draft</span>}
-                        {po.status === "SENT" && <span className="badge badge-warning" style={{ background: "#dbeafe", color: "#1e40af" }}>Dispatched / Sent</span>}
-                        {po.status === "RECEIVED" && <span className="badge badge-healthy">Stock Received</span>}
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {po.status === "DRAFT" && (
+                          <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                            Draft
+                          </span>
+                        )}
+                        {po.status === "SENT" && (
+                          <span className="badge badge-warning" style={{ background: "#dbeafe", color: "#1e40af", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                            Dispatched
+                          </span>
+                        )}
+                        {po.status === "RECEIVED" && (
+                          <span className="badge badge-healthy" style={{ background: "#dcfce7", color: "#15803d", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                            Stock Received
+                          </span>
+                        )}
                       </td>
-                      <td>{po.createdAt ? new Date(po.createdAt).toLocaleDateString() : "Today"}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: "6px" }}>
+                      <td style={{ whiteSpace: "nowrap" }}>{po.createdAt ? new Date(po.createdAt).toLocaleDateString() : "Today"}</td>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
                           {po.status === "DRAFT" && (
                             <fetcher.Form method="post" style={{ display: "inline" }}>
                               <input type="hidden" name="intent" value="update_po_status" />
                               <input type="hidden" name="poId" value={po.id} />
                               <input type="hidden" name="status" value="SENT" />
-                              <button type="submit" className="btn-primary" style={{ padding: "4px 10px", fontSize: "11px", background: "#2563eb" }}>
-                                Mark Sent 📩
+                              <button
+                                type="submit"
+                                className="btn-primary"
+                                style={{
+                                  padding: "6px 14px",
+                                  fontSize: "12px",
+                                  background: "#312e81",
+                                  color: "#ffffff",
+                                  border: "none",
+                                  borderRadius: "6px",
+                                  fontWeight: "600",
+                                  whiteSpace: "nowrap",
+                                  cursor: "pointer",
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                }}
+                              >
+                                Mark Sent
                               </button>
                             </fetcher.Form>
                           )}
@@ -1299,8 +1398,25 @@ export default function Settings() {
                               <input type="hidden" name="intent" value="update_po_status" />
                               <input type="hidden" name="poId" value={po.id} />
                               <input type="hidden" name="status" value="RECEIVED" />
-                              <button type="submit" className="btn-primary" style={{ padding: "4px 10px", fontSize: "11px", background: "#059669" }}>
-                                Mark Received ✓
+                              <button
+                                type="submit"
+                                className="btn-primary"
+                                style={{
+                                  padding: "6px 14px",
+                                  fontSize: "12px",
+                                  background: "#059669",
+                                  color: "#ffffff",
+                                  border: "none",
+                                  borderRadius: "6px",
+                                  fontWeight: "600",
+                                  whiteSpace: "nowrap",
+                                  cursor: "pointer",
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                }}
+                              >
+                                Mark Received
                               </button>
                             </fetcher.Form>
                           )}
@@ -1315,9 +1431,22 @@ export default function Settings() {
                               }
                             }}
                             className="btn-secondary"
-                            style={{ padding: "4px 10px", fontSize: "11px", textDecoration: "none", cursor: "pointer" }}
+                            style={{
+                              padding: "6px 14px",
+                              fontSize: "12px",
+                              background: "#f1f5f9",
+                              color: "#475569",
+                              border: "1px solid #cbd5e1",
+                              borderRadius: "6px",
+                              fontWeight: "600",
+                              whiteSpace: "nowrap",
+                              cursor: "pointer",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
                           >
-                            Email Supplier 📩
+                            Email Supplier
                           </button>
                         </div>
                       </td>
@@ -1346,24 +1475,6 @@ export default function Settings() {
 
       {activeTab === "subscribers" && restockGate.allowed && (
         <>
-          <div className="table-card" style={{ padding: "24px", marginBottom: "24px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
-              <div>
-                <h2 style={{ fontSize: "18px", margin: "0 0 4px 0", color: "#1e1b4b" }}>
-                  Storefront Restock Subscribers Engine
-                </h2>
-                <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
-                  Customers who submitted "Notify Me When Back in Stock" on sold-out products.
-                </p>
-              </div>
-              <div style={{ background: "#ecfdf5", padding: "8px 14px", borderRadius: "10px", border: "1px solid #a7f3d0" }}>
-                <span style={{ fontSize: "13px", fontWeight: "700", color: "#065f46" }}>
-                  Active Subscriber Queue: {subscribersList.length} Customer(s)
-                </span>
-              </div>
-            </div>
-          </div>
-
           <div className="table-card">
             <div className="table-header" style={{ padding: "20px 24px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
               <div>
@@ -1372,13 +1483,13 @@ export default function Settings() {
                   Automated alerts fire instantly when items are restocked in Shopify (0 &rarr; &gt;0 inventory) — by email, and by SMS for subscribers who left a number.
                 </p>
               </div>
-              <span className="badge badge-healthy" style={{ background: "#ecfdf5", color: "#047857", padding: "6px 14px", borderRadius: "20px", fontWeight: "600" }}>
+              <span className="badge badge-healthy" style={{ background: "#ecfdf5", color: "#047857", padding: "6px 14px", borderRadius: "20px", fontWeight: "600", whiteSpace: "nowrap" }}>
                 Active Subscriber Queue: {subscribersList.length} Customer(s)
               </span>
             </div>
 
             <div style={{ background: "#f8fafc", padding: "12px 24px", borderBottom: "1px solid var(--border-color)", fontSize: "13px", color: "#475569", lineHeight: "1.5" }}>
-              💡 <strong>How Restock Alerts Work:</strong> Emails are automatically dispatched to waiting customers as soon as stock levels for their requested item increase above zero in your store. You can also click <strong>"Send Alert Now"</strong> below to manually trigger the notification email anytime.
+              <strong>How Restock Alerts Work:</strong> Emails are automatically dispatched to waiting customers as soon as stock levels for their requested item increase above zero in your store. You can also click <strong>"Send Alert Now"</strong> below to manually trigger the notification email anytime.
             </div>
 
             <table className="data-table">
@@ -1397,7 +1508,7 @@ export default function Settings() {
               <tbody>
                 {subscribersList.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: "center", padding: "32px", color: "var(--text-muted)" }}>
+                    <td colSpan={8} style={{ textAlign: "center", padding: "32px", color: "var(--text-muted)" }}>
                       No customer restock requests captured yet. Ensure the "Notify Me When Back in Stock" app embed block is active in your Shopify Theme Editor.
                     </td>
                   </tr>
@@ -1406,8 +1517,8 @@ export default function Settings() {
                     const subId = sub.id || sub._id || "";
                     const isDispatchingThis = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "dispatch_restock_alert" && fetcher.formData?.get("subscriberId") === String(subId);
                     return (
-                      <tr key={subId || `${sub.email || sub.phone}-${sub.productId}`}>
-                        <td style={{ fontWeight: "600", color: "#1e293b" }}>
+                      <tr key={subId || `${sub.email || sub.phone}-${sub.productId}`} style={{ verticalAlign: "middle" }}>
+                        <td style={{ fontWeight: "600", color: "#1e293b", whiteSpace: "nowrap" }}>
                           {sub.email || <span style={{ color: "var(--text-muted)" }}>No email</span>}
                           {sub.phone && (
                             <div style={{ fontSize: "12px", fontWeight: "500", color: "#475569", marginTop: "2px" }}>
@@ -1415,7 +1526,7 @@ export default function Settings() {
                             </div>
                           )}
                         </td>
-                        <td>
+                        <td style={{ whiteSpace: "nowrap" }}>
                           {(() => {
                             // Records written before SMS existed carry no channel, and an
                             // email address is what they hold.
@@ -1427,28 +1538,28 @@ export default function Settings() {
                                 ? { background: "#eef2ff", color: "#3730a3" }
                                 : { background: "#ecfdf5", color: "#047857" };
                             return (
-                              <span style={{ ...tint, padding: "3px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
+                              <span style={{ ...tint, padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", display: "inline-block", whiteSpace: "nowrap" }}>
                                 {label}
                               </span>
                             );
                           })()}
                         </td>
-                        <td style={{ fontWeight: "600" }}>{sub.productTitle || sub.productId}</td>
-                        <td>{sub.variantTitle || "Default Variant"}</td>
-                        <td>
+                        <td style={{ fontWeight: "600", whiteSpace: "nowrap" }}>{sub.productTitle || sub.productId}</td>
+                        <td style={{ whiteSpace: "nowrap" }}>{sub.variantTitle || "Default Variant"}</td>
+                        <td style={{ whiteSpace: "nowrap" }}>
                           {sub.status === "SUBSCRIBED" ? (
-                            <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e" }}>
-                              Waiting for Restock
+                            <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                              Pending Restock
                             </span>
                           ) : (
-                            <span className="badge badge-healthy" style={{ background: "#dcfce7", color: "#15803d" }}>
-                              Notified ✓
+                            <span className="badge badge-healthy" style={{ background: "#dcfce7", color: "#15803d", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                              Notified
                             </span>
                           )}
                         </td>
-                        <td>{sub.createdAt ? new Date(sub.createdAt).toLocaleDateString() : "Recent"}</td>
-                        <td>{sub.notifiedAt ? new Date(sub.notifiedAt).toLocaleDateString() : "Pending Restock"}</td>
-                        <td style={{ textAlign: "right" }}>
+                        <td style={{ whiteSpace: "nowrap" }}>{sub.createdAt ? new Date(sub.createdAt).toLocaleDateString() : "Recent"}</td>
+                        <td style={{ whiteSpace: "nowrap" }}>{sub.notifiedAt ? new Date(sub.notifiedAt).toLocaleDateString() : "Pending Restock"}</td>
+                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                           <fetcher.Form method="post">
                             <input type="hidden" name="intent" value="dispatch_restock_alert" />
                             <input type="hidden" name="subscriberId" value={subId} />
@@ -1462,18 +1573,22 @@ export default function Settings() {
                               disabled={isDispatchingThis}
                               className="btn-secondary"
                               style={{
-                                padding: "5px 12px",
+                                padding: "6px 14px",
                                 fontSize: "12px",
-                                background: sub.status === "SUBSCRIBED" ? "#2563eb" : "#f1f5f9",
+                                background: sub.status === "SUBSCRIBED" ? "#312e81" : "#f1f5f9",
                                 color: sub.status === "SUBSCRIBED" ? "#ffffff" : "#475569",
                                 border: sub.status === "SUBSCRIBED" ? "none" : "1px solid #cbd5e1",
                                 cursor: isDispatchingThis ? "wait" : "pointer",
                                 opacity: isDispatchingThis ? 0.7 : 1,
                                 borderRadius: "6px",
                                 fontWeight: "600",
+                                whiteSpace: "nowrap",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                justifyContent: "center",
                               }}
                             >
-                              {isDispatchingThis ? "Sending..." : sub.status === "SUBSCRIBED" ? "Send Alert Now 📩" : "Resend Alert 📩"}
+                              {isDispatchingThis ? "Sending..." : sub.status === "SUBSCRIBED" ? "Send Alert Now" : "Resend Alert"}
                             </button>
                           </fetcher.Form>
                         </td>
@@ -1491,7 +1606,7 @@ export default function Settings() {
       {activeTab === "sms" && !smsGate.allowed && (
         <PlanLockedPanel
           gate={smsGate}
-          title="SMS Restock Notifications 📱"
+          title="SMS Restock Notifications"
           description="Text a waiting customer the moment their item is back — the fastest channel there is, and the one they read within minutes. Sent through your own Twilio account, or handed to Klaviyo so your existing SMS flows do the sending."
           bullets={[
             "Collect a mobile number alongside the email address on the storefront Notify Me form",
@@ -1532,8 +1647,8 @@ export default function Settings() {
                 {!smsSettings?.enableSmsAlerts
                   ? "Off"
                   : smsConfig.ready
-                  ? `Live via ${smsConfig.provider}`
-                  : "Needs credentials"}
+                    ? `Live via ${smsConfig.provider}`
+                    : "Needs credentials"}
               </span>
             </div>
 
@@ -1569,7 +1684,7 @@ export default function Settings() {
                 </label>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "18px" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "20px", alignItems: "start" }}>
                 <div>
                   <label htmlFor="smsProvider" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
                     Provider
@@ -1579,8 +1694,7 @@ export default function Settings() {
                     name="smsProvider"
                     value={smsProvider}
                     onChange={(e) => setSmsProvider(e.target.value)}
-                    className="form-input"
-                    style={{ width: "100%", height: "40px", padding: "0 10px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                    style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                   >
                     <option value="TWILIO">Twilio — this app sends the message</option>
                     <option value="KLAVIYO">Klaviyo — your flow sends the message</option>
@@ -1597,7 +1711,7 @@ export default function Settings() {
                     type="text"
                     defaultValue={smsSettings?.smsDefaultCountryCode || "+1"}
                     placeholder="+1"
-                    style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                    style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                   />
                   <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
                     Applied to numbers a customer types without one, e.g. 555 010 9999.
@@ -1608,7 +1722,7 @@ export default function Settings() {
               {smsProvider === "TWILIO" ? (
                 <div style={{ marginTop: "22px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
                   <h3 style={{ fontSize: "14px", margin: "0 0 14px 0", color: "#312e81" }}>Twilio credentials</h3>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "18px" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "20px", alignItems: "start" }}>
                     <div>
                       <label htmlFor="twilioAccountSid" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
                         Account SID
@@ -1619,7 +1733,7 @@ export default function Settings() {
                         type="text"
                         defaultValue={smsSettings?.twilioAccountSid || ""}
                         placeholder="AC…"
-                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                       />
                     </div>
 
@@ -1633,7 +1747,7 @@ export default function Settings() {
                         type="password"
                         autoComplete="new-password"
                         placeholder={smsSettings?.hasTwilioAuthToken ? "•••••••• (saved — leave blank to keep)" : "Your Twilio auth token"}
-                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                       />
                       <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
                         Never shown back to you. Leave blank to keep the saved token.
@@ -1650,7 +1764,7 @@ export default function Settings() {
                         type="text"
                         defaultValue={smsSettings?.twilioFromNumber || ""}
                         placeholder="+14155550123 or MG…"
-                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                       />
                     </div>
                   </div>
@@ -1658,7 +1772,7 @@ export default function Settings() {
               ) : (
                 <div style={{ marginTop: "22px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
                   <h3 style={{ fontSize: "14px", margin: "0 0 14px 0", color: "#312e81" }}>Klaviyo connection</h3>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "18px" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "20px", alignItems: "start" }}>
                     <div>
                       <label htmlFor="klaviyoApiKey" style={{ display: "block", fontSize: "13px", fontWeight: "600", color: "#334155", marginBottom: "6px" }}>
                         Private API key
@@ -1669,7 +1783,7 @@ export default function Settings() {
                         type="password"
                         autoComplete="new-password"
                         placeholder={smsSettings?.hasKlaviyoApiKey ? "•••••••• (saved — leave blank to keep)" : "pk_…"}
-                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                       />
                       <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
                         Needs the Profiles and Events write scopes.
@@ -1686,7 +1800,7 @@ export default function Settings() {
                         type="text"
                         defaultValue={smsSettings?.klaviyoSmsListId || ""}
                         placeholder="e.g. Y6nRLr"
-                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                       />
                       <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
                         Given a list, SMS marketing consent is recorded against it before the event is
@@ -1703,7 +1817,7 @@ export default function Settings() {
                         name="klaviyoMetricName"
                         type="text"
                         defaultValue={smsSettings?.klaviyoMetricName || "StockShield Back in Stock"}
-                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px" }}
+                        style={{ width: "100%", height: "40px", padding: "0 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", boxSizing: "border-box", background: "#ffffff" }}
                       />
                     </div>
                   </div>
@@ -1728,7 +1842,7 @@ export default function Settings() {
                   rows={3}
                   value={smsTemplate}
                   onChange={(e) => setSmsTemplate(e.target.value)}
-                  style={{ width: "100%", padding: "10px 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", fontFamily: "inherit", lineHeight: "1.5", resize: "vertical" }}
+                  style={{ width: "100%", padding: "10px 12px", border: "1px solid #cbd5e1", borderRadius: "8px", fontSize: "13px", fontFamily: "inherit", lineHeight: "1.5", resize: "vertical", boxSizing: "border-box", background: "#ffffff" }}
                 />
                 <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "6px" }}>
                   Placeholders: <code>{"{{product}}"}</code> <code>{"{{variant}}"}</code>{" "}
@@ -1755,7 +1869,7 @@ export default function Settings() {
                   type="submit"
                   className="btn-primary"
                   disabled={isSavingSms}
-                  style={{ padding: "10px 22px", fontWeight: "600", borderRadius: "8px", background: "#4f46e5", opacity: isSavingSms ? 0.7 : 1 }}
+                  style={{ padding: "10px 22px", fontWeight: "600", borderRadius: "8px", background: "#312e81", opacity: isSavingSms ? 0.7 : 1 }}
                 >
                   {isSavingSms ? "Saving..." : "Save SMS Settings"}
                 </button>
@@ -1782,9 +1896,9 @@ export default function Settings() {
               />
               <button
                 type="submit"
-                className="btn-secondary"
+                className="btn-primary"
                 disabled={isSendingTestSms || !testPhone.trim()}
-                style={{ height: "42px", padding: "0 20px", fontWeight: "600", borderRadius: "8px", opacity: isSendingTestSms || !testPhone.trim() ? 0.6 : 1 }}
+                style={{ background: "#312e81", height: "42px", padding: "0 20px", fontWeight: "600", borderRadius: "8px", opacity: isSendingTestSms || !testPhone.trim() ? 0.6 : 1 }}
               >
                 {isSendingTestSms ? "Sending..." : "Send test SMS"}
               </button>

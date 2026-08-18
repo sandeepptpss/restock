@@ -408,7 +408,7 @@ export default function Dashboard() {
               type="submit"
               className="btn-primary"
               disabled={isScanning}
-              style={{ background: "#4f46e5", padding: "8px 18px", fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", borderRadius: "8px" }}
+              style={{ background: "#312e81", padding: "8px 18px", fontSize: "13px", display: "inline-flex", alignItems: "center", gap: "6px", borderRadius: "8px" }}
             >
               {isScanning ? "Scanning Catalog..." : "Run Safety Scan"}
             </button>
@@ -783,21 +783,22 @@ export default function Dashboard() {
             <Link
               to="/app/roi"
               style={{
-                background: "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
-                color: "#ffffff",
-                padding: "11px 22px",
-                borderRadius: "10px",
+                background: "#ffffff",
+                color: "#0f172a",
+                padding: "10px 22px",
+                borderRadius: "8px",
                 fontSize: "13px",
                 fontWeight: "700",
                 textDecoration: "none",
-                boxShadow: "0 4px 14px rgba(99, 102, 241, 0.4)",
                 display: "inline-flex",
                 alignItems: "center",
                 gap: "6px",
                 whiteSpace: "nowrap",
+                boxShadow: "0 2px 8px rgba(0, 0, 0, 0.15)",
+                transition: "all 0.15s ease",
               }}
             >
-              View Full ROI Analytics →
+              View Full ROI Analytics &rarr;
             </Link>
           </div>
         </div>

@@ -50,11 +50,10 @@ export const loader = async ({ request }) => {
         eventType: "BILLING_ACTIVATE",
         productTitle: `Subscription activated: ${subscription.plan}`,
         variantTitle: "Shopify Billing Confirmed",
-        actionTaken: `Shopify confirms an active ${subscription.plan} subscription. Plan features enabled.${
-          subscription.trialEndsAt
+        actionTaken: `Shopify confirms an active ${subscription.plan} subscription. Plan features enabled.${subscription.trialEndsAt
             ? ` Free trial runs until ${new Date(subscription.trialEndsAt).toISOString().slice(0, 10)}; the first charge is taken then.`
             : ""
-        }`,
+          }`,
         status: "SUCCESS",
       });
     } else if (!confirmed) {
@@ -68,7 +67,7 @@ export const loader = async ({ request }) => {
         variantTitle: "Shopify Billing",
         actionTaken: `Return URL claimed ${planToActivate.toUpperCase()}, but Shopify has no matching active subscription. Plan stays ${subscription?.plan}.`,
         status: "FAILED",
-      }).catch(() => {});
+      }).catch(() => { });
     }
   }
 
@@ -120,7 +119,7 @@ export const action = async ({ request }) => {
         variantTitle: "Shopify Billing",
         actionTaken: `Cancelled ${cancelled} active subscription(s) and moved the shop to the FREE plan.`,
         status: "SUCCESS",
-      }).catch(() => {});
+      }).catch(() => { });
 
       return { success: true, subscription: updatedSub };
     }
@@ -530,8 +529,8 @@ export default function PlanPage() {
               {isChangingPlan && targetPlan === "FREE"
                 ? "Switching Plan..."
                 : selectedPlan === "FREE"
-                ? "Current Active Plan"
-                : "Select Free Plan"}
+                  ? "Current Active Plan"
+                  : "Select Free Plan"}
             </button>
           </div>
 
@@ -613,8 +612,8 @@ export default function PlanPage() {
               {isChangingPlan && targetPlan === "GROWTH"
                 ? "Processing..."
                 : selectedPlan === "GROWTH"
-                ? "Current Active Plan"
-                : cta("GROWTH", "Upgrade to Growth")}
+                  ? "Current Active Plan"
+                  : cta("GROWTH", "Upgrade to Growth")}
             </button>
           </div>
 
@@ -699,8 +698,8 @@ export default function PlanPage() {
               {isChangingPlan && targetPlan === "PRO"
                 ? "Processing..."
                 : selectedPlan === "PRO"
-                ? "Current Active Plan"
-                : cta("PRO", "Upgrade to Pro")}
+                  ? "Current Active Plan"
+                  : cta("PRO", "Upgrade to Pro")}
             </button>
           </div>
 
@@ -778,8 +777,8 @@ export default function PlanPage() {
               {isChangingPlan && targetPlan === "ENTERPRISE"
                 ? "Processing..."
                 : selectedPlan === "ENTERPRISE"
-                ? "Current Active Plan"
-                : "Upgrade to Enterprise"}
+                  ? "Current Active Plan"
+                  : "Upgrade to Enterprise"}
             </button>
           </div>
         </div>

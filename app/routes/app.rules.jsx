@@ -929,7 +929,7 @@ export default function AutomationRules() {
             type="submit"
             className="btn-primary"
             disabled={isSubmitting}
-            style={{ padding: "14px 32px", fontSize: "15px", background: "#0284c7" }}
+            style={{ padding: "14px 32px", fontSize: "15px", background: "#312e81" }}
           >
             {isSubmitting ? "Saving Settings..." : "Save & Apply Rules"}
           </button>
