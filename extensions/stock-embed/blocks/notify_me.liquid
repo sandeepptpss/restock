@@ -1,23 +1,849 @@
 {% comment %}
-  Out of Stock Notify Me Form Block
+  StockShield - Out of Stock "Notify Me" App Block (Supports Pop-up Modal & Inline Form with full Merchant Customization)
+
+  The widget is a paid-plan capability. The block reads the entitlement from the
+  app-owned shop metafield the dashboard publishes (the same one stock_badge.liquid
+  reads), because a theme block keeps rendering long after a merchant downgrades —
+  it lives in their theme, not in the app. `restockWidget` false takes the form off
+  the storefront; the endpoint refuses the write as well, so a stale cached page
+  cannot subscribe anyone either.
+
+  A shop whose config has not been published yet resolves to false rather than
+  true: an unwritten metafield is an unknown plan, and an unknown plan must not be
+  served a paid feature.
 {% endcomment %}
-{% if product and product.available == false %}
-  <div id="stock-notify-container" style="margin: 16px 0; padding: 16px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
-    <h4 style="margin: 0 0 8px 0; font-size: 14px; color: #1e293b;">📩 Notify Me When Back in Stock</h4>
-    <p style="margin: 0 0 12px 0; font-size: 12px; color: #64748b;">Enter your email to receive an instant alert when this item is restocked.</p>
-    <div style="display: flex; gap: 8px;">
-      <input type="email" id="stock-notify-email" placeholder="your@email.com" style="flex: 1; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px;">
-      <button type="button" onclick="submitStockNotify()" style="background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px;">Subscribe</button>
-    </div>
-    <div id="stock-notify-msg" style="display: none; margin-top: 8px; font-size: 12px; color: #16a34a; font-weight: 600;">Thanks! We will notify you as soon as this item is back in stock.</div>
-  </div>
-  <script>
-    function submitStockNotify() {
-      var email = document.getElementById('stock-notify-email').value;
-      if (email) {
-        document.getElementById('stock-notify-msg').style.display = 'block';
-        document.getElementById('stock-notify-email').value = '';
+{%- liquid
+  assign ss_config = app.metafields.stockshield.storefront_config.value
+  unless ss_config
+    assign ss_config = shop.metafields['$app:stockshield']['storefront_config'].value
+  endunless
+
+  assign ss_restock_widget = false
+  if ss_config and ss_config.restockWidget
+    assign ss_restock_widget = true
+  endif
+
+  assign has_sold_out_variant = false
+  if product and product.variants
+    for v in product.variants
+      if v.available == false
+        assign has_sold_out_variant = true
+        break
+      endif
+    endfor
+  endif
+
+  assign show_widget = false
+  if ss_restock_widget
+    if product.available == false or has_sold_out_variant or request.design_mode
+      assign show_widget = true
+    endif
+  endif
+-%}
+{% if product and show_widget %}
+  {% assign display_style = block.settings.display_style | default: "modal" %}
+  {% assign btn_text = block.settings.btn_text | default: "Notify me" %}
+  {% assign btn_bg = block.settings.btn_bg_color | default: "#4f46e5" %}
+  {% assign btn_text_color = block.settings.btn_text_color | default: "#ffffff" %}
+  {% assign border_radius = block.settings.btn_border_radius | default: 8 %}
+  {% assign card_bg = block.settings.card_bg_color | default: "#f8fafc" %}
+  {% assign card_border = block.settings.card_border_color | default: "#e2e8f0" %}
+  {% assign notify_title = block.settings.notify_title | default: "Notify Me When Back in Stock" %}
+  {% assign subtext = block.settings.subtext | default: "Enter your email to receive an instant alert when this item is restocked." %}
+  {% assign modal_submit_text = block.settings.modal_submit_text | default: "Notify Me When Available" %}
+
+  <div 
+    id="stock-notify-container" 
+    style="
+      margin: 14px 0; 
+      width: 100%; 
+      box-sizing: border-box; 
+      font-family: inherit;
+    "
+  >
+    {% if display_style == "inline" %}
+      <!-- MODE 1: INLINE CARD FORM -->
+      <div 
+        style="
+          padding: 20px; 
+          background: {{ card_bg }}; 
+          border: 1px solid {{ card_border }}; 
+          border-radius: {{ border_radius }}px; 
+          box-shadow: 0 4px 12px rgba(0,0,0,0.03); 
+          box-sizing: border-box; 
+          width: 100%;
+        "
+      >
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+          {% if block.settings.show_bell_icon != false %}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{ btn_bg }}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+              <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+            </svg>
+          {% endif %}
+          <h4 style="margin: 0; font-size: 15px; font-weight: 700; color: #0f172a; line-height: 1.3;">
+            {{ notify_title }}
+          </h4>
+        </div>
+
+        {% if subtext != blank %}
+          <p style="margin: 4px 0 14px 0; font-size: 13px; color: #475569; line-height: 1.45;">
+            {{ subtext }}
+          </p>
+        {% endif %}
+
+        {% if block.settings.show_variant_select != false and product.variants.size > 1 %}
+          <div style="margin-bottom: 12px;">
+            <select 
+              id="stock-notify-inline-variant" 
+              style="
+                width: 100%; 
+                height: 40px; 
+                padding: 0 12px; 
+                border: 1px solid #cbd5e1; 
+                border-radius: {{ border_radius }}px; 
+                font-size: 13px; 
+                background: #ffffff; 
+                color: #0f172a;
+                box-sizing: border-box;
+                margin-bottom: 8px;
+              "
+            >
+              {% for v in product.variants %}
+                <option value="{{ v.id }}" {% if v.id == product.selected_or_first_available_variant.id %}selected{% endif %}>
+                  {{ v.title }}{% if v.available == false %} (Sold out){% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+        {% endif %}
+
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <input 
+            type="email" 
+            id="stock-notify-email" 
+            placeholder="your@email.com" 
+            style="
+              flex: 1; 
+              min-width: 200px; 
+              height: 44px; 
+              padding: 0 14px; 
+              border: 1px solid #cbd5e1; 
+              border-radius: {{ border_radius }}px; 
+              font-size: 14px; 
+              outline: none; 
+              background: #ffffff; 
+              color: #0f172a;
+              box-sizing: border-box;
+            "
+            onfocus="this.style.borderColor='{{ btn_bg }}';"
+            onblur="this.style.borderColor='#cbd5e1';"
+          />
+          <button 
+            type="button" 
+            id="stock-notify-btn"
+            onclick="submitStockNotifyInline()" 
+            style="
+              height: 44px; 
+              background: {{ btn_bg }}; 
+              color: {{ btn_text_color }}; 
+              border: none; 
+              padding: 0 20px; 
+              border-radius: {{ border_radius }}px; 
+              font-weight: 600; 
+              cursor: pointer; 
+              font-size: 14px; 
+              white-space: nowrap;
+              transition: opacity 0.2s;
+            "
+            onmouseover="this.style.opacity='0.92';"
+            onmouseout="this.style.opacity='1';"
+          >
+            {{ btn_text }}
+          </button>
+        </div>
+
+        <div id="stock-notify-msg" style="display: none; margin-top: 12px; padding: 10px 14px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; font-size: 13px; color: #166534; font-weight: 600; line-height: 1.4;">
+          Thank you! We will notify you when this item is back in stock.
+        </div>
+        <div id="stock-notify-error" style="display: none; margin-top: 12px; padding: 10px 14px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; font-size: 13px; color: #991b1b; font-weight: 600; line-height: 1.4;">
+          Please enter a valid email address.
+        </div>
+      </div>
+
+    {% else %}
+      <!-- MODE 2: POP-UP MODAL BUTTON -->
+      <button 
+        type="button" 
+        id="stock-notify-trigger"
+        onclick="openStockNotifyModal()"
+        style="
+          width: 100%;
+          min-height: 46px;
+          background-color: {{ btn_bg }};
+          color: {{ btn_text_color }};
+          border: none;
+          border-radius: {{ border_radius }}px;
+          font-size: 15px;
+          font-weight: 600;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          padding: 12px 20px;
+          transition: opacity 0.2s, transform 0.15s;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        "
+        onmouseover="this.style.opacity='0.92';"
+        onmouseout="this.style.opacity='1';"
+      >
+        {% if block.settings.show_bell_icon != false %}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+          </svg>
+        {% endif %}
+        <span>{{ btn_text }}</span>
+      </button>
+
+      <!-- Modal Popup Overlay -->
+      <div 
+        id="stock-notify-modal-backdrop" 
+        style="
+          display: none;
+          position: fixed !important;
+          top: 0 !important;
+          left: 0 !important;
+          right: 0 !important;
+          bottom: 0 !important;
+          width: 100vw !important;
+          height: 100vh !important;
+          background: rgba(15, 23, 42, 0.65) !important;
+          backdrop-filter: blur(6px) !important;
+          -webkit-backdrop-filter: blur(6px) !important;
+          z-index: 2147483647 !important;
+          align-items: center !important;
+          justify-content: center !important;
+          padding: 16px !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
+        "
+        onclick="handleStockNotifyBackdropClick(event)"
+      >
+        <div 
+          id="stock-notify-modal-box"
+          style="
+            background: #ffffff !important;
+            width: 100% !important;
+            max-width: 440px !important;
+            max-height: calc(100vh - 32px) !important;
+            overflow-y: auto !important;
+            border-radius: 20px !important;
+            padding: 24px 24px 20px 24px !important;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(0, 0, 0, 0.05) !important;
+            box-sizing: border-box !important;
+            position: relative !important;
+            margin: auto !important;
+            animation: stockNotifyModalPop 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+          "
+        >
+          <!-- Header Top Row with Icon Badge and Close Button -->
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;">
+            <div style="
+              width: 40px; 
+              height: 40px; 
+              border-radius: 12px; 
+              background: {{ btn_bg }}15; 
+              display: flex; 
+              align-items: center; 
+              justify-content: center;
+              color: {{ btn_bg }};
+            ">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+              </svg>
+            </div>
+            <button 
+              type="button" 
+              onclick="closeStockNotifyModal()" 
+              aria-label="Close notification modal"
+              style="
+                background: #f1f5f9; 
+                border: none; 
+                width: 32px;
+                height: 32px;
+                border-radius: 50%;
+                color: #64748b; 
+                cursor: pointer; 
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition: all 0.15s ease;
+              "
+              onmouseover="this.style.background='#e2e8f0'; this.style.color='#0f172a';"
+              onmouseout="this.style.background='#f1f5f9'; this.style.color='#64748b';"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Header Title -->
+          <h3 style="margin: 0 0 6px 0; font-size: 19px; font-weight: 700; color: #0f172a; line-height: 1.3;">
+            {{ notify_title }}
+          </h3>
+
+          <!-- Product Details Chip -->
+          {% if product %}
+            <div style="
+              display: inline-flex;
+              align-items: center;
+              gap: 6px;
+              padding: 4px 10px;
+              background: #f8fafc;
+              border: 1px solid #e2e8f0;
+              border-radius: 6px;
+              font-size: 12px;
+              font-weight: 600;
+              color: #475569;
+              margin-bottom: 12px;
+              max-width: 100%;
+              box-sizing: border-box;
+            ">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: #ef4444; flex-shrink: 0;"></span>
+              <span id="stock-notify-modal-product-badge" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                {{ product.title }}{% if product.selected_or_first_available_variant and product.selected_or_first_available_variant.title != "Default Title" %} • {{ product.selected_or_first_available_variant.title }}{% endif %}
+              </span>
+            </div>
+          {% endif %}
+
+          <!-- Subtext -->
+          {% if subtext != blank %}
+            <p style="margin: 0 0 18px 0; font-size: 13.5px; color: #64748b; line-height: 1.45;">
+              {{ subtext }}
+            </p>
+          {% endif %}
+
+          <!-- Form Body -->
+          <div id="stock-notify-modal-form">
+            <!-- Email Input -->
+            <div style="margin-bottom: 14px;">
+              <label style="display: block; font-size: 13px; font-weight: 600; color: #334155; margin-bottom: 6px;">
+                Email Address
+              </label>
+              <input 
+                type="email" 
+                id="stock-notify-modal-email" 
+                placeholder="name@example.com" 
+                style="
+                  width: 100%; 
+                  height: 44px; 
+                  padding: 0 14px; 
+                  border: 1.5px solid #cbd5e1; 
+                  border-radius: {{ border_radius }}px; 
+                  font-size: 14px; 
+                  outline: none; 
+                  background: #ffffff; 
+                  color: #0f172a;
+                  box-sizing: border-box;
+                  transition: border-color 0.2s, box-shadow 0.2s;
+                "
+                onfocus="this.style.borderColor='{{ btn_bg }}'; this.style.boxShadow='0 0 0 3px {{ btn_bg }}22';"
+                onblur="this.style.borderColor='#cbd5e1'; this.style.boxShadow='none';"
+              />
+            </div>
+
+            <!-- Variant Option Selector -->
+            {% if block.settings.show_variant_select != false and product.variants.size > 1 %}
+              <div style="margin-bottom: 16px;">
+                <label style="display: block; font-size: 13px; font-weight: 600; color: #334155; margin-bottom: 6px;">
+                  Select Variant / Option
+                </label>
+                <select 
+                  id="stock-notify-modal-variant" 
+                  onchange="updateModalVariantBadge(this)"
+                  style="
+                    width: 100%; 
+                    height: 44px; 
+                    padding: 0 14px; 
+                    border: 1.5px solid #cbd5e1; 
+                    border-radius: {{ border_radius }}px; 
+                    font-size: 14px; 
+                    outline: none; 
+                    background: #ffffff; 
+                    color: #0f172a;
+                    box-sizing: border-box;
+                    cursor: pointer;
+                    transition: border-color 0.2s;
+                  "
+                  onfocus="this.style.borderColor='{{ btn_bg }}';"
+                  onblur="this.style.borderColor='#cbd5e1';"
+                >
+                  {% for v in product.variants %}
+                    <option value="{{ v.id }}" {% if v.id == product.selected_or_first_available_variant.id %}selected{% endif %}>
+                      {{ v.title }}{% if v.available == false %} (Sold out){% endif %}
+                    </option>
+                  {% endfor %}
+                </select>
+              </div>
+            {% endif %}
+
+            <!-- Marketing Consent Checkbox -->
+            <label style="display: flex; align-items: center; gap: 10px; font-size: 13px; color: #475569; margin-bottom: 20px; cursor: pointer; user-select: none;">
+              <input 
+                type="checkbox" 
+                id="stock-notify-modal-consent" 
+                checked 
+                style="width: 17px; height: 17px; accent-color: {{ btn_bg }}; cursor: pointer;" 
+              />
+              <span>Notify me about other news or offers too</span>
+            </label>
+
+            <!-- Submit Button -->
+            <button 
+              type="button" 
+              id="stock-notify-modal-submit"
+              onclick="submitStockNotifyModal()" 
+              style="
+                width: 100%; 
+                height: 46px; 
+                background: {{ btn_bg }}; 
+                color: {{ btn_text_color }}; 
+                border: none; 
+                border-radius: {{ border_radius }}px; 
+                font-size: 15px; 
+                font-weight: 700; 
+                cursor: pointer; 
+                box-shadow: 0 4px 14px {{ btn_bg }}35;
+                transition: opacity 0.2s, transform 0.15s;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+              "
+              onmouseover="this.style.opacity='0.94'; this.style.transform='translateY(-1px)';"
+              onmouseout="this.style.opacity='1'; this.style.transform='translateY(0)';"
+            >
+              <span>{{ modal_submit_text }}</span>
+            </button>
+
+            <!-- Feedback Messages -->
+            <div id="stock-notify-modal-msg" style="display: none; margin-top: 14px; padding: 12px 16px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; font-size: 13px; color: #166534; font-weight: 600; line-height: 1.4; text-align: center;">
+              ✓ Thank you! We will notify you when this item is back in stock.
+            </div>
+            <div id="stock-notify-modal-error" style="display: none; margin-top: 14px; padding: 12px 16px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; font-size: 13px; color: #991b1b; font-weight: 600; line-height: 1.4; text-align: center;">
+              Please enter a valid email address.
+            </div>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <style>
+      @keyframes stockNotifyModalPop {
+        from { opacity: 0; transform: scale(0.95) translateY(10px); }
+        to { opacity: 1; transform: scale(1) translateY(0); }
       }
+    </style>
+
+    <script type="application/json" id="stock-notify-data">
+      {
+        "productId": {{ product.id | json }},
+        "productTitle": {{ product.title | json }},
+        "defaultVariantId": {{ product.selected_or_first_available_variant.id | json }},
+        "isFullySoldOut": {% if product.available == false %}true{% else %}false{% endif %},
+        "designMode": {% if request.design_mode %}true{% else %}false{% endif %},
+        "apiUrl": {{ ss_config.apiUrl | json }},
+        "variants": [
+          {%- for v in product.variants -%}
+            {"id": {{ v.id | json }}, "title": {{ v.title | json }}, "available": {{ v.available | json }}}{% unless forloop.last %},{% endunless %}
+          {%- endfor -%}
+        ]
+      }
+    </script>
+  </div>
+
+  <script>
+    function moveNotifyModalToBody() {
+      var backdrop = document.getElementById('stock-notify-modal-backdrop');
+      if (backdrop && backdrop.parentNode !== document.body) {
+        document.body.appendChild(backdrop);
+      }
+    }
+
+    (function() {
+      function positionNotifyBlock() {
+        var container = document.getElementById('stock-notify-container');
+        if (!container) return;
+
+        var buyButtonsSelectors = [
+          '.product-form__buttons',
+          '.product__buy-buttons',
+          'buy-buttons',
+          '.shopify-payment-button',
+          'form[action*="/cart/add"]'
+        ];
+
+        var targetEl = null;
+        for (var i = 0; i < buyButtonsSelectors.length; i++) {
+          var el = document.querySelector(buyButtonsSelectors[i]);
+          if (el) {
+            targetEl = el;
+            break;
+          }
+        }
+
+        if (targetEl && targetEl.parentNode) {
+          // If container is positioned BEFORE buy buttons in DOM order, move it to right after buy buttons
+          if (targetEl.compareDocumentPosition(container) & Node.DOCUMENT_POSITION_PRECEDING) {
+            targetEl.parentNode.insertBefore(container, targetEl.nextSibling);
+          }
+        }
+
+        updateNotifyVisibility();
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() {
+          positionNotifyBlock();
+          moveNotifyModalToBody();
+          updateNotifyVisibility();
+        });
+      } else {
+        positionNotifyBlock();
+        moveNotifyModalToBody();
+        updateNotifyVisibility();
+      }
+
+      document.addEventListener('change', function(e) {
+        setTimeout(updateNotifyVisibility, 50);
+      });
+
+      ['pushState', 'replaceState'].forEach(function(type) {
+        var orig = history[type];
+        if (typeof orig === 'function') {
+          history[type] = function() {
+            var ret = orig.apply(this, arguments);
+            setTimeout(updateNotifyVisibility, 50);
+            return ret;
+          };
+        }
+      });
+
+      window.addEventListener('popstate', function() {
+        setTimeout(updateNotifyVisibility, 50);
+      });
+    })();
+
+    function updateModalVariantBadge(selectEl) {
+      var badgeEl = document.getElementById('stock-notify-modal-product-badge');
+      var data = stockNotifyData();
+      if (!badgeEl || !data.productTitle) return;
+
+      var variantTitle = '';
+      if (selectEl && selectEl.options && selectEl.options[selectEl.selectedIndex]) {
+        variantTitle = selectEl.options[selectEl.selectedIndex].text.replace(/\s*\(Sold out\)/i, '').trim();
+      } else {
+        var v = stockNotifyVariant(data);
+        if (v && v.title) variantTitle = v.title;
+      }
+
+      var displayText = data.productTitle;
+      if (variantTitle && variantTitle !== 'Default Title') {
+        displayText += ' • ' + variantTitle;
+      }
+      badgeEl.textContent = displayText;
+    }
+
+    function resetStockNotifyModal() {
+      var emailInput = document.getElementById('stock-notify-modal-email');
+      var submitBtn = document.getElementById('stock-notify-modal-submit');
+      var msg = document.getElementById('stock-notify-modal-msg');
+      var err = document.getElementById('stock-notify-modal-error');
+
+      if (msg) msg.style.display = 'none';
+      if (err) err.style.display = 'none';
+      if (emailInput) emailInput.value = '';
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<span>{{ modal_submit_text }}</span>';
+        submitBtn.style.background = '{{ btn_bg }}';
+        submitBtn.style.opacity = '1';
+      }
+    }
+
+    function openStockNotifyModal() {
+      moveNotifyModalToBody();
+      var backdrop = document.getElementById('stock-notify-modal-backdrop');
+      var emailInput = document.getElementById('stock-notify-modal-email');
+      var variantSelect = document.getElementById('stock-notify-modal-variant');
+      if (!backdrop) return;
+
+      resetStockNotifyModal();
+
+      backdrop.style.setProperty('display', 'flex', 'important');
+      document.body.style.overflow = 'hidden';
+
+      var data = stockNotifyData();
+      var variant = stockNotifyVariant(data);
+      if (variantSelect && variant && variant.id) {
+        variantSelect.value = variant.id;
+      }
+
+      updateModalVariantBadge(variantSelect);
+
+      if (emailInput) {
+        setTimeout(function() { emailInput.focus(); }, 100);
+      }
+    }
+
+    function closeStockNotifyModal() {
+      var backdrop = document.getElementById('stock-notify-modal-backdrop');
+      if (backdrop) {
+        backdrop.style.setProperty('display', 'none', 'important');
+        document.body.style.overflow = '';
+        setTimeout(resetStockNotifyModal, 200);
+      }
+    }
+
+    function handleStockNotifyBackdropClick(e) {
+      if (e.target && e.target.id === 'stock-notify-modal-backdrop') {
+        closeStockNotifyModal();
+      }
+    }
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        closeStockNotifyModal();
+      }
+    });
+
+    var STOCK_NOTIFY_ENDPOINT = '/apps/stock-control/api/subscribe-restock';
+
+    function stockNotifyData() {
+      var el = document.getElementById('stock-notify-data');
+      try {
+        return el ? JSON.parse(el.textContent) : {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function stockNotifyVariant(data) {
+      var variants = data.variants || [];
+      if (!variants.length) return { id: data.defaultVariantId, title: '', available: false };
+
+      // 1. Try URL parameter ?variant=123456789
+      var params = new URLSearchParams(window.location.search);
+      var urlVariantId = params.get('variant');
+      if (urlVariantId) {
+        var matchUrl = variants.find(function(v) { return String(v.id) === String(urlVariantId); });
+        if (matchUrl) return matchUrl;
+      }
+
+      // 2. Try form inputs (e.g. form [name="id"], select[name="id"], input[name="id"])
+      var formInputs = document.querySelectorAll('form[action*="/cart/add"] [name="id"], select[name="id"], input[name="id"], [data-variant-id]');
+      for (var f = 0; f < formInputs.length; f++) {
+        var val = formInputs[f].value || formInputs[f].getAttribute('data-variant-id');
+        if (val) {
+          var matchForm = variants.find(function(v) { return String(v.id) === String(val); });
+          if (matchForm) return matchForm;
+        }
+      }
+
+      // 3. Try checking option radio buttons / selects in variant picker (e.g., Size: 28)
+      var checkedOptions = document.querySelectorAll('variant-radios input:checked, fieldset input:checked, .variant-picker input:checked, select.single-option-selector, .product-form__input input:checked');
+      var optionTexts = [];
+      for (var c = 0; c < checkedOptions.length; c++) {
+        var valText = (checkedOptions[c].value || '').trim().toLowerCase();
+        if (valText) optionTexts.push(valText);
+      }
+      if (optionTexts.length > 0) {
+        var matchOpt = variants.find(function(v) {
+          var vTitle = (v.title || '').trim().toLowerCase();
+          return optionTexts.some(function(opt) {
+            return vTitle === opt || vTitle.includes(opt);
+          });
+        });
+        if (matchOpt) return matchOpt;
+      }
+
+      // 4. Try matching defaultVariantId
+      var matchDefault = variants.find(function(v) { return String(v.id) === String(data.defaultVariantId); });
+      if (matchDefault) return matchDefault;
+
+      // 5. Fallback to first variant
+      return variants[0];
+    }
+
+    function updateNotifyVisibility() {
+      var container = document.getElementById('stock-notify-container');
+      if (!container) return;
+
+      var data = stockNotifyData();
+      var currentVariant = stockNotifyVariant(data);
+
+      var isDesignMode = data.designMode === true;
+      var isVariantSoldOut = currentVariant && currentVariant.available === false;
+      var isFullySoldOut = data.isFullySoldOut === true;
+
+      if (isDesignMode || isVariantSoldOut || isFullySoldOut) {
+        container.style.display = 'block';
+      } else {
+        container.style.display = 'none';
+      }
+    }
+
+    function submitSubscriptionRequest(payload, onStart, onSuccess, onError) {
+      onStart();
+
+      var data = stockNotifyData();
+      var directApiUrl = (data && data.apiUrl) ? (data.apiUrl.replace(/\/$/, '') + '/api/subscribe-restock') : null;
+
+      function doFetch(targetUrl, isFallback) {
+        fetch(targetUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+          .then(function (res) {
+            if (!res.ok) {
+              if (res.status === 404 && !isFallback && directApiUrl) {
+                return doFetch(directApiUrl, true);
+              }
+              return res.json().then(function (errBody) {
+                throw new Error((errBody && errBody.error) || ('Server error (' + res.status + ')'));
+              }).catch(function (parseErr) {
+                if (parseErr && parseErr.message && !parseErr.message.includes('JSON')) {
+                  throw parseErr;
+                }
+                throw new Error(
+                  res.status === 404
+                    ? 'Restock alerts endpoint non-responsive.'
+                    : 'Server error (' + res.status + ').'
+                );
+              });
+            }
+            return res.json();
+          })
+          .then(function (body) {
+            if (!body) return;
+            if (body.success !== true) {
+              throw new Error((body && body.error) || 'Could not save your request.');
+            }
+            onSuccess(body);
+          })
+          .catch(function (e) {
+            if (!isFallback && directApiUrl) {
+              doFetch(directApiUrl, true);
+            } else {
+              console.error('[StockShield] Restock subscription failed:', e.message);
+              onError(e.message || 'Restock alerts endpoint non-responsive.');
+            }
+          });
+      }
+
+      doFetch(STOCK_NOTIFY_ENDPOINT, false);
+    }
+
+    function submitStockNotifyInline() {
+      var emailInput = document.getElementById('stock-notify-email');
+      var variantSelect = document.getElementById('stock-notify-inline-variant');
+      var btn = document.getElementById('stock-notify-btn');
+      var msg = document.getElementById('stock-notify-msg');
+      var err = document.getElementById('stock-notify-error');
+
+      var email = emailInput ? emailInput.value.trim() : '';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+        if (err) { err.textContent = 'Please enter a valid email address.'; err.style.display = 'block'; }
+        if (msg) msg.style.display = 'none';
+        return;
+      }
+
+      var data = stockNotifyData();
+      var selectedVariantId = variantSelect ? variantSelect.value : '';
+      var variants = data.variants || [];
+      var chosenVariant = variants.find(function(v) { return String(v.id) === String(selectedVariantId); }) || stockNotifyVariant(data);
+      var shop = (window.Shopify && window.Shopify.shop) || '{{ shop.permanent_domain }}';
+
+      var payload = {
+        shop: shop,
+        email: email,
+        productId: 'gid://shopify/Product/' + data.productId,
+        productTitle: data.productTitle || '',
+        variantId: chosenVariant.id ? 'gid://shopify/ProductVariant/' + chosenVariant.id : '',
+        variantTitle: chosenVariant.title || ''
+      };
+
+      submitSubscriptionRequest(
+        payload,
+        function() {
+          if (err) err.style.display = 'none';
+          if (btn) { btn.innerText = 'Subscribing...'; btn.disabled = true; btn.style.opacity = '0.7'; }
+        },
+        function() {
+          if (msg) msg.style.display = 'block';
+          if (emailInput) emailInput.value = '';
+          if (btn) { btn.innerText = 'Subscribed ✓'; btn.style.background = '#16a34a'; btn.style.opacity = '1'; }
+        },
+        function(errorText) {
+          if (err) { err.textContent = errorText; err.style.display = 'block'; }
+          if (btn) { btn.innerText = '{{ btn_text }}'; btn.disabled = false; btn.style.opacity = '1'; }
+        }
+      );
+    }
+
+    function submitStockNotifyModal() {
+      var emailInput = document.getElementById('stock-notify-modal-email');
+      var variantSelect = document.getElementById('stock-notify-modal-variant');
+      var submitBtn = document.getElementById('stock-notify-modal-submit');
+      var msg = document.getElementById('stock-notify-modal-msg');
+      var err = document.getElementById('stock-notify-modal-error');
+
+      var email = emailInput ? emailInput.value.trim() : '';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+        if (err) { err.textContent = 'Please enter a valid email address.'; err.style.display = 'block'; }
+        if (msg) msg.style.display = 'none';
+        return;
+      }
+
+      var data = stockNotifyData();
+      var selectedVariantId = variantSelect ? variantSelect.value : '';
+      var variants = data.variants || [];
+      var chosenVariant = variants.find(function(v) { return String(v.id) === String(selectedVariantId); }) || stockNotifyVariant(data);
+      var shop = (window.Shopify && window.Shopify.shop) || '{{ shop.permanent_domain }}';
+
+      var payload = {
+        shop: shop,
+        email: email,
+        productId: 'gid://shopify/Product/' + data.productId,
+        productTitle: data.productTitle || '',
+        variantId: chosenVariant.id ? 'gid://shopify/ProductVariant/' + chosenVariant.id : '',
+        variantTitle: chosenVariant.title || ''
+      };
+
+      submitSubscriptionRequest(
+        payload,
+        function() {
+          if (err) err.style.display = 'none';
+          if (submitBtn) { submitBtn.innerText = 'Submitting...'; submitBtn.disabled = true; submitBtn.style.opacity = '0.7'; }
+        },
+        function() {
+          if (msg) msg.style.display = 'block';
+          if (emailInput) emailInput.value = '';
+          if (submitBtn) { submitBtn.innerHTML = '<span>Subscribed! ✓</span>'; submitBtn.style.background = '#16a34a'; submitBtn.style.opacity = '1'; }
+          setTimeout(function() { closeStockNotifyModal(); }, 1800);
+        },
+        function(errorText) {
+          if (err) { err.textContent = errorText; err.style.display = 'block'; }
+          if (submitBtn) { submitBtn.innerHTML = '<span>{{ modal_submit_text }}</span>'; submitBtn.disabled = false; submitBtn.style.opacity = '1'; }
+        }
+      );
     }
   </script>
 {% endif %}
@@ -28,10 +854,100 @@
   "target": "section",
   "settings": [
     {
+      "type": "header",
+      "content": "Display Style"
+    },
+    {
+      "type": "select",
+      "id": "display_style",
+      "label": "Widget Style",
+      "options": [
+        { "value": "modal", "label": "Pop-up Modal (Trigger Button -> Opens Modal)" },
+        { "value": "inline", "label": "Inline Form (Card on page with email box)" }
+      ],
+      "default": "modal"
+    },
+    {
+      "type": "header",
+      "content": "Button Customization"
+    },
+    {
+      "type": "text",
+      "id": "btn_text",
+      "label": "Button Label Text",
+      "default": "Notify me"
+    },
+    {
+      "type": "color",
+      "id": "btn_bg_color",
+      "label": "Button Background Color",
+      "default": "#4f46e5"
+    },
+    {
+      "type": "color",
+      "id": "btn_text_color",
+      "label": "Button Text Color",
+      "default": "#ffffff"
+    },
+    {
+      "type": "range",
+      "id": "btn_border_radius",
+      "min": 0,
+      "max": 30,
+      "step": 1,
+      "unit": "px",
+      "label": "Border Radius (Corners)",
+      "default": 8
+    },
+    {
+      "type": "checkbox",
+      "id": "show_bell_icon",
+      "label": "Show Bell Icon in Button",
+      "default": true
+    },
+    {
+      "type": "header",
+      "content": "Form & Modal Text"
+    },
+    {
       "type": "text",
       "id": "notify_title",
-      "label": "Form Title",
+      "label": "Form / Modal Header Title",
       "default": "Notify Me When Back in Stock"
+    },
+    {
+      "type": "text",
+      "id": "subtext",
+      "label": "Description Helper Text",
+      "default": "Enter your email to receive an instant alert when this item is restocked."
+    },
+    {
+      "type": "text",
+      "id": "modal_submit_text",
+      "label": "Modal Action Button Text",
+      "default": "Notify Me When Available"
+    },
+    {
+      "type": "header",
+      "content": "Colors & Options"
+    },
+    {
+      "type": "color",
+      "id": "card_bg_color",
+      "label": "Inline Card Background Color",
+      "default": "#f8fafc"
+    },
+    {
+      "type": "color",
+      "id": "card_border_color",
+      "label": "Inline Card Border Color",
+      "default": "#e2e8f0"
+    },
+    {
+      "type": "checkbox",
+      "id": "show_variant_select",
+      "label": "Show Variant Selector Dropdown",
+      "default": true
     }
   ]
 }

@@ -272,6 +272,53 @@ const supportTicketSchema = new Schema(
   { timestamps: { createdAt: true, updatedAt: true }, collection: "supporttickets" }
 );
 supportTicketSchema.index({ shop: 1, createdAt: -1 });
+// A ticket id addresses one ticket, so the database has to agree that it does.
+// The previous ids were four random digits out of 9,000, which by the birthday
+// bound duplicate at around 112 tickets — and an update matched on the id would
+// then have hit whichever of the two Mongo happened to find first.
+supportTicketSchema.index({ ticketId: 1 }, { unique: true });
+
+const backInStockSubscriberSchema = new Schema(
+  {
+    shop: { type: String, required: true, index: true },
+    email: { type: String, required: true },
+    productId: { type: String, required: true },
+    productTitle: { type: String, default: "" },
+    variantId: { type: String, default: "" },
+    variantTitle: { type: String, default: "" },
+    status: { type: String, default: "SUBSCRIBED" }, // SUBSCRIBED, NOTIFIED
+    notifiedAt: { type: Date, default: null },
+  },
+  { timestamps: { createdAt: true, updatedAt: true }, collection: "backinstocksubscribers" }
+);
+backInStockSubscriberSchema.index({ shop: 1, productId: 1, variantId: 1, status: 1 });
+
+const purchaseOrderSchema = new Schema(
+  {
+    shop: { type: String, required: true, index: true },
+    poNumber: { type: String, required: true },
+    supplierName: { type: String, default: "Primary Supplier" },
+    supplierEmail: { type: String, default: "" },
+    items: [
+      {
+        productId: { type: String, default: "" },
+        productTitle: { type: String, default: "" },
+        variantId: { type: String, default: "" },
+        variantTitle: { type: String, default: "" },
+        sku: { type: String, default: "" },
+        currentQty: { type: Number, default: 0 },
+        targetQty: { type: Number, default: 50 },
+        reorderQty: { type: Number, default: 50 },
+      },
+    ],
+    totalItems: { type: Number, default: 0 },
+    status: { type: String, default: "DRAFT" }, // DRAFT, SENT, RECEIVED
+    sentAt: { type: Date, default: null },
+    receivedAt: { type: Date, default: null },
+  },
+  { timestamps: { createdAt: true, updatedAt: true }, collection: "purchaseorders" }
+);
+purchaseOrderSchema.index({ shop: 1, createdAt: -1 });
 
 /**
  * Register a model, replacing one that an earlier evaluation of this file left
@@ -309,3 +356,6 @@ export const Subscription = model("Subscription", subscriptionSchema);
 export const ScheduledRestock = model("ScheduledRestock", scheduledRestockSchema);
 export const VariantStockState = model("VariantStockState", variantStockStateSchema);
 export const SupportTicket = model("SupportTicket", supportTicketSchema);
+export const BackInStockSubscriber = model("BackInStockSubscriber", backInStockSubscriberSchema);
+export const PurchaseOrder = model("PurchaseOrder", purchaseOrderSchema);
+

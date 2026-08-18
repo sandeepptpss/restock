@@ -71,6 +71,25 @@ body {
   font-size: 14px;
 }
 
+.stock-header-subtext {
+  font-size: 13px;
+  color: #94a3b8;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+.stock-header a {
+  color: #93c5fd;
+  text-decoration: underline;
+  font-weight: 600;
+  transition: color 0.2s ease;
+}
+
+.stock-header a:hover {
+  color: #bfdbfe;
+  text-decoration: underline;
+}
+
 .stock-badge-active {
   display: inline-flex;
   align-items: center;
@@ -181,8 +200,8 @@ body {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 14px;
-  box-shadow: var(--shadow-sm);
-  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  overflow-x: auto;
   margin-bottom: 24px;
 }
 
@@ -194,6 +213,7 @@ body {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+  background: #ffffff;
 }
 
 .table-title {
@@ -227,32 +247,39 @@ body {
   border-color: #312e81;
 }
 
-.stock-table {
+.stock-table, .data-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   text-align: left;
-  font-size: 14px;
+  font-size: 13.5px;
 }
 
-.stock-table th {
+.stock-table th, .data-table th {
   background: #f8fafc;
   padding: 14px 20px;
   font-size: 12px;
   font-weight: 700;
-  color: var(--text-muted);
+  color: #475569;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1.5px solid var(--border-color);
+  white-space: nowrap;
 }
 
-.stock-table td {
+.stock-table td, .data-table td {
   padding: 16px 20px;
   border-bottom: 1px solid #f1f5f9;
   vertical-align: middle;
+  color: #1e293b;
 }
 
-.stock-table tr:hover {
+.stock-table tr:hover, .data-table tr:hover {
   background-color: #f8fafc;
+}
+
+.stock-table tr:last-child td, .data-table tr:last-child td {
+  border-bottom: none;
 }
 
 .product-cell {

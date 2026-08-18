@@ -145,8 +145,8 @@ export const action = async ({ request }) => {
     try {
       const response = await admin.graphql(
         `#graphql
-          mutation appSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean, $trialDays: Int) {
-            appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test, trialDays: $trialDays) {
+          mutation appSubscriptionCreate($name: String!, $returnUrl: URL!, $lineItems: [AppSubscriptionLineItemInput!]!, $test: Boolean, $trialDays: Int, $replacementBehavior: AppSubscriptionReplacementBehavior) {
+            appSubscriptionCreate(name: $name, returnUrl: $returnUrl, lineItems: $lineItems, test: $test, trialDays: $trialDays, replacementBehavior: $replacementBehavior) {
               userErrors { field message }
               confirmationUrl
             }
@@ -158,6 +158,13 @@ export const action = async ({ request }) => {
             returnUrl,
             test: isTestCharge,
             trialDays,
+            // The new subscription supersedes the old one the moment the merchant
+            // approves it, so the shop is never left holding two at once. Left to
+            // the default the previous subscription is only cancelled "in most
+            // cases", and every exception is a shop billed twice — and, until the
+            // plan resolver stopped preferring the priciest active subscription, a
+            // downgrade that silently never took effect.
+            replacementBehavior: "APPLY_IMMEDIATELY",
             lineItems: [
               {
                 plan: {
@@ -564,6 +571,9 @@ export default function PlanPage() {
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Storefront Back-in-Stock widget</span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Supplier Purchase Orders (POs)</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Instant Resend Email Alerts</strong></span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
@@ -726,6 +736,13 @@ export default function PlanPage() {
             </tr>
             <tr>
               <td><strong>Storefront Back-in-Stock Widget</strong></td>
+              <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+              <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+            </tr>
+            <tr>
+              <td><strong>Supplier Purchase Orders (POs)</strong></td>
               <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
               <td style={{ textAlign: "center", color: "#94a3b8" }}>—</td>
               <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>

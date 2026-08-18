@@ -1,4 +1,10 @@
 import mongoose from "mongoose";
+import { webcrypto } from "node:crypto";
+
+if (typeof globalThis.crypto === "undefined" && webcrypto) {
+  // Polyfill globalThis.crypto for Node 16 compatibility with MongoDB driver
+  globalThis.crypto = webcrypto;
+}
 
 /**
  * MongoDB connection (Mongoose).

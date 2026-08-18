@@ -106,13 +106,13 @@ export default function AutomationLogs() {
         <div>
           <h1>Automation Audit Trail &amp; Logs</h1>
           <p>Real-time log of every automatic action, tag modification, product status change, and alert</p>
-          <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "4px" }}>
+          <p style={{ fontSize: "13px", color: "#cbd5e1", marginTop: "6px" }}>
             {plan?.logRetentionDays == null ? (
               <>Unlimited audit retention on the {plan?.name} plan.</>
             ) : (
               <>
                 Showing the last {plan?.logRetentionDays} days — audit retention on the{" "}
-                {plan?.name} plan. <Link to="/app/plan">Upgrade for longer history</Link>.
+                {plan?.name} plan. <Link to="/app/plan" style={{ color: "#93c5fd", fontWeight: "600", textDecoration: "underline" }}>Upgrade for longer history &rarr;</Link>
               </>
             )}
           </p>

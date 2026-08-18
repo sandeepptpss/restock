@@ -5,6 +5,15 @@ name = "stock-control"
 application_url = "https://example.com"
 embedded = true
 
+# Shopify appends whatever follows the subpath to this URL, so it must be the app
+# ORIGIN and nothing more. Pointing it at /api/subscribe-restock made the storefront
+# call to /apps/stock-control/api/subscribe-restock arrive at
+# /api/subscribe-restock/api/subscribe-restock, which 404s — no subscriber was ever stored.
+[app_proxy]
+url = "https://example.com"
+subpath = "stock-control"
+prefix = "apps"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_publications,write_publications,write_metaobjects,write_metaobject_definitions"

@@ -1,11 +1,13 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import mongoose, { isDbConfigured, tryConnectDB } from "../db.server";
 import {
   AutomationLog,
   AutomationRule,
+  BackInStockSubscriber,
   InventoryEvent,
   InventorySettings,
   ProductThreshold,
+  PurchaseOrder,
   ScheduledRestock,
   Session,
   Subscription,
@@ -19,6 +21,7 @@ import {
   applyPlanToSettings,
   getPlan,
   normalizePlan,
+  planAllows,
   PLAN_ORDER,
   PLAN_PRICES,
 } from "../utils/planLimits";
@@ -1054,6 +1057,15 @@ async function ensureStorefrontConfigDefinition(admin, shop) {
 export function buildStorefrontConfig(settings = {}) {
   return {
     v: 1,
+    // Where the storefront can reach this app directly.
+    //
+    // The restock form's first choice is the app proxy, but the proxy's subpath is
+    // only registered when the app is INSTALLED — adding `[app_proxy]` to an app
+    // that merchants already have installed leaves /apps/<subpath>/… returning the
+    // storefront's own 404 until they reinstall. Publishing the app origin here
+    // gives the form a CORS fallback that works either way, and it re-syncs
+    // automatically whenever the dev tunnel changes.
+    apiUrl: (process.env.SHOPIFY_APP_URL || "").replace(/\/$/, ""),
     hideSoldOutCards:
       settings.enableAutoHide !== false && CATALOG_HIDING_MODES.has(settings.visibilityMode),
     lowStockBadge: settings.enableLowStockBadge !== false,
@@ -1062,6 +1074,13 @@ export function buildStorefrontConfig(settings = {}) {
     outOfStockTag: settings.outOfStockTag || "out-of-stock",
     lowStockTag: settings.lowStockTag || "low-stock",
     visibilityMode: settings.visibilityMode || "ACTIVE_HIDDEN",
+    // Whether the theme embed may render the "Notify me when back in stock" form.
+    //
+    // The widget is a paid tier's feature, and the theme block is the one part of
+    // the app that keeps running after a downgrade — it lives in the merchant's
+    // theme, not in this app. Publishing the entitlement here is what lets the
+    // block take itself off the storefront when the plan no longer covers it.
+    restockWidget: Boolean(settings.planFeatures?.backInStockWidget),
   };
 }
 
@@ -2900,18 +2919,34 @@ export async function scheduleProductRestock(
   const jobScope = jobType === "AUTO_FILL" ? `${productTitle} / ${variantTitle || finalVariantId}` : productTitle;
 
   if (existingJob) {
-    if (existingJob.scheduledAt > new Date()) {
-      console.log(`[ScheduledRestock] Job ${existingJob.id} is already PENDING for ${jobScope} (scheduled for ${existingJob.scheduledAt.toISOString()})`);
-      // `created: false` lets the catalogue scan tell "I queued a recovery for
-      // this variant" from "one was already queued", so a scan running every
-      // minute does not re-log and re-email an unchanged stockout.
-      return { ...existingJob, created: false };
+    if (existingJob.scheduledAt <= new Date()) {
+      console.log(`[ScheduledRestock] Existing job ${existingJob.id} for ${jobScope} is overdue — executing immediately`);
+      executeScheduledRestock(admin, existingJob.id, { shop, productTitle, variantTitle, sku, settings });
+      return { ...existingJob, created: false, executed: true };
     }
-    await ScheduledRestock.updateOne(
-      { _id: existingJob.id },
-      { $set: { status: "CANCELLED" } }
-    );
-    console.log(`[ScheduledRestock] Cancelled stale overdue job ${existingJob.id} for ${jobScope} and rescheduling`);
+
+    if (scheduledAt < existingJob.scheduledAt) {
+      await ScheduledRestock.updateOne(
+        { _id: existingJob.id },
+        { $set: { scheduledAt, targetQuantity, locationId: finalLocationId, status: "PENDING" } }
+      );
+      console.log(`[ScheduledRestock] Rescheduled pending job ${existingJob.id} for ${jobScope} to new earlier schedule: ${scheduledAt.toISOString()} (delay: ${delayMs}ms)`);
+
+      if (delayMs >= 0 && delayMs <= 86400000) {
+        setTimeout(async () => {
+          try {
+            console.log(`[ScheduledRestock] In-memory timer fired for updated job ${existingJob.id}`);
+            await executeScheduledRestock(null, existingJob.id, { shop, productTitle, variantTitle, sku, settings });
+          } catch (err) {
+            console.error(`[ScheduledRestock] Timer execution error for updated job ${existingJob.id}:`, err);
+          }
+        }, delayMs);
+      }
+      return { ...existingJob, scheduledAt, created: false, updated: true };
+    }
+
+    console.log(`[ScheduledRestock] Job ${existingJob.id} is already PENDING for ${jobScope} (scheduled for ${existingJob.scheduledAt.toISOString()})`);
+    return { ...existingJob, created: false };
   }
 
   const record = plain(
@@ -3061,6 +3096,10 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
 
   const isUnhideJob = record.jobType === "UNHIDE";
   const didAutoFill = record.targetQuantity > 0;
+  // Declared here rather than beside the tagsRemove call below: the DRAFT guard in
+  // step 2 reads it to tell a product this app drafted from one the merchant
+  // drafted, and a `const` used above its declaration throws a ReferenceError.
+  const tagToRemove = settings.outOfStockTag || "out-of-stock";
 
   // 2. Never un-hide a product that is still out of stock under the configured
   // Variant Stockout Condition.
@@ -3148,7 +3187,6 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
 
   // 3. Remove Out-of-Stock Tag
   const warnings = [];
-  const tagToRemove = settings.outOfStockTag || "out-of-stock";
   try {
     const tagRes = await adminClient.graphql(
       `#graphql
@@ -3434,6 +3472,45 @@ export async function getShopSubscription(shop) {
 export { PLAN_LIMITS, checkPlanLimitStatus } from "../utils/planLimits";
 
 /**
+ * Whether a shop's current plan includes one capability.
+ *
+ * The shop-domain-in / boolean-out form the storefront endpoints need: they only
+ * ever hold a domain, never a loaded subscription, and every one of them has to
+ * make the same check before it writes anything a paid tier pays for.
+ */
+export async function shopAllowsFeature(shop, feature) {
+  const cleanShop = normalizeShopDomain(shop);
+  if (!cleanShop) return false;
+  return planAllows((await getShopSubscription(cleanShop))?.plan, feature);
+}
+
+/**
+ * Which plan one Shopify subscription record represents.
+ *
+ * Matched on the charged amount rather than the subscription name: the name is a
+ * display string this app happens to set, while the price is what the merchant is
+ * actually billed and what the plan matrix is defined by. The name is only a
+ * fallback for a subscription whose pricing could not be read.
+ */
+function planFromSubscription(sub) {
+  const amount = Number(sub?.lineItems?.[0]?.plan?.pricingDetails?.price?.amount);
+  const matched = PLAN_ORDER.find(
+    (key) => PLAN_PRICES[key] > 0 && Math.abs(PLAN_PRICES[key] - amount) < 0.01
+  );
+  return (
+    matched ||
+    PLAN_ORDER.find((key) => sub?.name?.toUpperCase().includes(key)) ||
+    "FREE"
+  );
+}
+
+/** A subscription's creation time in ms, with anything unparseable sorting oldest. */
+function subscriptionCreatedMs(sub) {
+  const ms = new Date(sub?.createdAt || 0).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/**
  * The plan Shopify says this shop is actually paying for.
  *
  * The billing return URL carries `?charge_approved=true&plan=…`, which is a
@@ -3455,8 +3532,10 @@ export async function fetchActivePlanFromShopify(admin) {
         query activeSubscriptions {
           currentAppInstallation {
             activeSubscriptions {
+              id
               name
               status
+              createdAt
               lineItems {
                 plan {
                   pricingDetails {
@@ -3482,22 +3561,41 @@ export async function fetchActivePlanFromShopify(admin) {
     );
     if (active.length === 0) return "FREE";
 
-    // Matched on the charged amount rather than the subscription name: the name
-    // is a display string this app happens to set, while the price is what the
-    // merchant is actually billed and what the plan matrix is defined by.
-    let best = "FREE";
-    for (const sub of active) {
-      const amount = Number(sub.lineItems?.[0]?.plan?.pricingDetails?.price?.amount);
-      const matched = PLAN_ORDER.find(
-        (key) => PLAN_PRICES[key] > 0 && Math.abs(PLAN_PRICES[key] - amount) < 0.01
+    // The plan is the subscription the merchant most recently agreed to.
+    //
+    // This used to return the highest-ranked of the active subscriptions, which is
+    // the one rule it must not use. `activeSubscriptions` is a list, and a shop can
+    // hold more than one — a superseded subscription that Shopify has not cancelled
+    // yet, a cancellation that failed halfway through, or test charges stacked up on
+    // a development store. Whenever that happened after a downgrade, the tier the
+    // merchant had just left outranked the one they had just chosen and won, and it
+    // kept winning on every later sync for as long as the old subscription existed:
+    // the downgrade could never take effect, because a bigger plan always beat it.
+    //
+    // Ties (equal or unreadable timestamps) break towards the *lower* plan, so an
+    // ordering this function cannot establish never resolves into free paid features.
+    const current = [...active].sort((a, b) => {
+      const byNewest = subscriptionCreatedMs(b) - subscriptionCreatedMs(a);
+      if (byNewest !== 0) return byNewest;
+      return PLAN_ORDER.indexOf(planFromSubscription(a)) - PLAN_ORDER.indexOf(planFromSubscription(b));
+    })[0];
+
+    const plan = planFromSubscription(current);
+
+    // More than one active subscription means the merchant is being billed more
+    // than once. The app deliberately does not cancel the extras on its own —
+    // that is the merchant's money and their decision — but it must not stay quiet
+    // about it either.
+    if (active.length > 1) {
+      console.error(
+        `[billing] ${active.length} active subscriptions found; charging more than once. ` +
+          `Using the newest (${plan}). All: ${active
+            .map((sub) => `${planFromSubscription(sub)}@${sub.createdAt || "unknown date"}`)
+            .join(", ")}`
       );
-      const candidate =
-        matched ||
-        PLAN_ORDER.find((key) => sub.name?.toUpperCase().includes(key)) ||
-        "FREE";
-      if (PLAN_ORDER.indexOf(candidate) > PLAN_ORDER.indexOf(best)) best = candidate;
     }
-    return best;
+
+    return plan;
   } catch (err) {
     console.error("[billing] Could not read active subscriptions:", err.message);
     return null;
@@ -3617,10 +3715,57 @@ export async function updateShopSubscription(shop, plan, { trialUsed } = {}) {
 /**
  * Create a new merchant support ticket
  */
+let supportAdminUnsetWarned = false;
+
+/**
+ * Whether this shop is the app's own support desk rather than a merchant using it.
+ *
+ * The support inbox and the merchant support form live on the same Settings tab,
+ * which left every merchant holding the reply controls for their own tickets —
+ * they could write their own "solution" and mark themselves resolved — while the
+ * person who actually answers tickets could not see any store's tickets but their
+ * own. This is the line between the two roles.
+ *
+ * Set SUPPORT_ADMIN_SHOPS to the myshopify domain(s) that staff the desk, comma
+ * separated. Unset means nobody is admin, not everybody: an allowlist that fails
+ * open is the same bug it was added to close.
+ */
+export function isSupportAdminShop(shop) {
+  const configured = (process.env.SUPPORT_ADMIN_SHOPS || "")
+    .split(",")
+    .map((entry) => normalizeShopDomain(entry))
+    .filter(Boolean);
+
+  if (configured.length === 0) {
+    if (!supportAdminUnsetWarned) {
+      supportAdminUnsetWarned = true;
+      console.warn(
+        "[support] SUPPORT_ADMIN_SHOPS is not set, so no shop can answer support tickets. " +
+          "Set it to your own myshopify domain to open the support desk."
+      );
+    }
+    return false;
+  }
+
+  return configured.includes(normalizeShopDomain(shop));
+}
+
+/**
+ * A ticket id that addresses exactly one ticket.
+ *
+ * Base-36 milliseconds keeps ids sortable by age and unique per millisecond; the
+ * random suffix covers two tickets filed inside the same one. The previous scheme
+ * was four random digits — 9,000 possible ids, which duplicate at around 112
+ * tickets, at which point an id no longer identified a single ticket.
+ */
+function generateTicketId() {
+  return `TICK-${Date.now().toString(36).toUpperCase()}-${randomBytes(4).toString("hex").toUpperCase()}`;
+}
+
 export async function createSupportTicket({ shop, name, email, topic, message }) {
   if (!isDbConfigured()) {
     return {
-      ticketId: `TICK-${Date.now().toString().slice(-4)}`,
+      ticketId: generateTicketId(),
       shop,
       name,
       email,
@@ -3631,7 +3776,7 @@ export async function createSupportTicket({ shop, name, email, topic, message })
     };
   }
   await tryConnectDB();
-  const ticketId = `TICK-${Math.floor(1000 + Math.random() * 9000)}`;
+  const ticketId = generateTicketId();
   const ticket = await SupportTicket.create({
     shop,
     ticketId,
@@ -3661,9 +3806,16 @@ export async function getSupportTickets(shop, limit = 50) {
 }
 
 /**
- * Update support ticket status and admin reply
+ * Update support ticket status and admin reply.
+ *
+ * `shop` narrows the update to one store's tickets and callers acting on behalf of
+ * a merchant must pass it. Matching on the ticket id alone — which is what this
+ * used to do — let any store address any other store's ticket: the id travels in
+ * the form body, so a merchant could post one that was never theirs and silently
+ * close or overwrite it. Only the support admin, who is meant to answer every
+ * store's tickets, may leave it unset.
  */
-export async function updateSupportTicketStatus(ticketId, { status, adminReply }) {
+export async function updateSupportTicketStatus(ticketId, { status, adminReply, shop = null }) {
   if (!isDbConfigured()) return null;
   await tryConnectDB();
   const updateData = { status };
@@ -3672,11 +3824,418 @@ export async function updateSupportTicketStatus(ticketId, { status, adminReply }
     updateData.repliedAt = new Date();
   }
   const updated = await SupportTicket.findOneAndUpdate(
-    { ticketId },
+    shop ? { ticketId, shop } : { ticketId },
     { $set: updateData },
     { returnDocument: "after" }
   ).lean();
   return plain(updated);
 }
+
+const inMemorySubscribers = [];
+
+/**
+ * The shop as the subscriber records store it. The storefront can report the
+ * domain with a scheme or a trailing slash, while the webhook always sends a
+ * bare `example.myshopify.com`; without this the two never match each other.
+ */
+function normalizeShopDomain(shop) {
+  return (shop || "").toLowerCase().replace(/^https?:\/\//, "").replace(/\/$/, "").trim();
+}
+
+/** A store handle goes straight into a RegExp, so any metacharacter is literal. */
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Add a customer back-in-stock subscriber
+ */
+export async function addBackInStockSubscriber({ shop, email, productId, productTitle, variantId, variantTitle }) {
+  const cleanEmail = (email || "").toLowerCase().trim();
+  const cleanShop = normalizeShopDomain(shop);
+
+  const record = {
+    _id: `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    shop: cleanShop,
+    email: cleanEmail,
+    productId: productId || "",
+    productTitle: productTitle || "Restocked Product",
+    variantId: variantId || "",
+    variantTitle: variantTitle || "",
+    status: "SUBSCRIBED",
+    createdAt: new Date(),
+  };
+
+  const existingIdx = inMemorySubscribers.findIndex(
+    (s) => s.shop === cleanShop && s.email === cleanEmail && s.productId === productId
+  );
+  if (existingIdx >= 0) {
+    inMemorySubscribers[existingIdx] = { ...inMemorySubscribers[existingIdx], ...record };
+  } else {
+    inMemorySubscribers.push(record);
+  }
+
+  if (!isDbConfigured()) return record;
+
+  try {
+    await tryConnectDB();
+    const subscriber = await BackInStockSubscriber.findOneAndUpdate(
+      { 
+        $or: [{ shop: cleanShop }, { shop: cleanShop.split(".")[0] }], 
+        email: cleanEmail, 
+        productId, 
+        variantId: variantId || "" 
+      },
+      {
+        $set: {
+          shop: cleanShop,
+          productTitle: productTitle || "",
+          variantTitle: variantTitle || "",
+          status: "SUBSCRIBED",
+        },
+      },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+    ).lean();
+    return plain(subscriber);
+  } catch (err) {
+    console.warn("[addBackInStockSubscriber] DB error, using memory record:", err.message);
+    return record;
+  }
+}
+
+/**
+ * Whether this shop has the app installed.
+ *
+ * Guards the storefront subscribe endpoint on the direct (non-proxy) path, where
+ * there is no signed request to prove which shop is calling and the shop is taken
+ * from the request body. Without it, anyone could POST subscriptions naming a shop
+ * that has nothing to do with this app. Fails open on a lookup error — a database
+ * hiccup must not silently stop real customers from subscribing.
+ */
+export async function isShopInstalled(shop) {
+  const cleanShop = normalizeShopDomain(shop);
+  if (!cleanShop) return false;
+  if (!isDbConfigured()) return true;
+
+  try {
+    await tryConnectDB();
+    const session = await Session.findOne({ shop: cleanShop }).lean();
+    return Boolean(session);
+  } catch (err) {
+    console.warn("[isShopInstalled] Session lookup failed, allowing request:", err.message);
+    return true;
+  }
+}
+
+/**
+ * Get back-in-stock subscribers for a shop or specific product/variant
+ */
+export async function getBackInStockSubscribers(shop, { productId, variantId, status } = {}) {
+  const cleanShop = normalizeShopDomain(shop);
+  const shopHandle = cleanShop.split(".")[0];
+
+  function filterMemory() {
+    return inMemorySubscribers.filter((s) => {
+      const matchShop = s.shop === cleanShop || s.shop.includes(shopHandle) || shopHandle.includes(s.shop);
+      if (!matchShop) return false;
+      if (productId && s.productId !== productId) return false;
+      if (variantId && s.variantId !== variantId) return false;
+      if (status && s.status !== status) return false;
+      return true;
+    });
+  }
+
+  if (!isDbConfigured() || !cleanShop) return filterMemory();
+
+  try {
+    await tryConnectDB();
+    const shopRegex = new RegExp(escapeRegExp(shopHandle), "i");
+    const query = { shop: { $regex: shopRegex } };
+    if (productId) query.productId = productId;
+    if (variantId) query.variantId = variantId;
+    if (status) query.status = status;
+    const subs = await BackInStockSubscriber.find(query).sort({ createdAt: -1 }).lean();
+    const result = plainAll(subs);
+    return result.length > 0 ? result : filterMemory();
+  } catch (err) {
+    console.warn("[getBackInStockSubscribers] Error:", err.message);
+    return filterMemory();
+  }
+}
+
+/**
+ * Email every customer who asked to hear about this variant coming back, then
+ * retire them from the queue.
+ *
+ * This used to flip each subscriber to NOTIFIED and log that an email had been
+ * "triggered" without ever sending one, so the queue emptied itself and no
+ * customer heard anything. A subscriber is now only marked NOTIFIED once their
+ * mail is genuinely away — a Resend failure leaves them SUBSCRIBED so the next
+ * restock (or a retry) still reaches them.
+ */
+export async function notifyCustomerRestock(shop, { productId, variantId, productTitle, variantTitle, productHandle }) {
+  if (!shop || !productId) return 0;
+
+  const cleanShop = normalizeShopDomain(shop);
+
+  // Customer-facing restock mail is part of the back-in-stock widget, so a shop
+  // whose plan no longer includes it stops sending. Subscribers are deliberately
+  // left SUBSCRIBED rather than retired: the queue they built up is theirs again
+  // the moment the plan covers it, and nobody is silently dropped.
+  if (!(await shopAllowsFeature(cleanShop, "backInStockWidget"))) {
+    console.log(
+      `[notifyCustomerRestock] Skipped for ${cleanShop}: the current plan does not include back-in-stock alerts`
+    );
+    return 0;
+  }
+  const shopHandle = cleanShop.split(".")[0];
+
+  // A subscriber recorded before a variant could be identified carries "", and a
+  // single-variant product's sold-out form posts an empty variant too. Both are
+  // waiting on this product, so neither may be filtered out by an exact match.
+  const matchesVariant = (subVariantId) =>
+    !variantId || !subVariantId || String(subVariantId) === String(variantId);
+
+  let subscribers = [];
+  const usingDb = isDbConfigured();
+
+  if (usingDb) {
+    try {
+      await tryConnectDB();
+      // Matched on the store handle: the shop is stored as whatever the storefront
+      // reported (with or without the .myshopify.com suffix), while the webhook
+      // always carries the full domain.
+      const found = await BackInStockSubscriber.find({
+        shop: { $regex: new RegExp(escapeRegExp(shopHandle), "i") },
+        productId,
+        status: "SUBSCRIBED",
+      }).lean();
+      subscribers = found.filter((s) => matchesVariant(s.variantId));
+    } catch (err) {
+      console.error("[notifyCustomerRestock] Could not load subscribers:", err.message);
+      return 0;
+    }
+  } else {
+    subscribers = inMemorySubscribers.filter(
+      (s) =>
+        (s.shop === cleanShop || s.shop.includes(shopHandle) || shopHandle.includes(s.shop)) &&
+        s.productId === productId &&
+        s.status === "SUBSCRIBED" &&
+        matchesVariant(s.variantId)
+    );
+  }
+
+  if (!subscribers.length) {
+    console.log(`[notifyCustomerRestock] No waiting subscribers for ${productTitle || productId}`);
+    return 0;
+  }
+
+  // Loaded lazily: email.server imports back into this module for its audit trail.
+  const { sendCustomerBackInStockEmail } = await import("./email.server.js");
+
+  const productUrl = productHandle
+    ? `https://${cleanShop}/products/${productHandle}`
+    : `https://${cleanShop}/collections/all`;
+
+  const notified = [];
+  const failed = [];
+  const now = new Date();
+
+  for (const sub of subscribers) {
+    const result = await sendCustomerBackInStockEmail(cleanShop, {
+      customerEmail: sub.email,
+      productTitle: sub.productTitle || productTitle,
+      variantTitle: sub.variantTitle || variantTitle,
+      productUrl,
+    });
+
+    if (!result.ok) {
+      failed.push(`${sub.email}: ${result.error}`);
+      continue;
+    }
+
+    notified.push(sub.email);
+
+    if (usingDb) {
+      await BackInStockSubscriber.updateOne(
+        { _id: sub._id },
+        { $set: { status: "NOTIFIED", notifiedAt: now } }
+      ).catch((err) => console.warn("[notifyCustomerRestock] Could not mark subscriber notified:", err.message));
+    }
+
+    // Kept in step whether or not a database is configured, so a memory-only run
+    // does not mail the same customer again on the next restock.
+    const memIdx = inMemorySubscribers.findIndex(
+      (s) => s.shop === cleanShop && s.email === sub.email && s.productId === sub.productId
+    );
+    if (memIdx >= 0) {
+      inMemorySubscribers[memIdx].status = "NOTIFIED";
+      inMemorySubscribers[memIdx].notifiedAt = now;
+    }
+  }
+
+  await createAutomationLog({
+    shop: cleanShop,
+    eventType: "CUSTOMER_RESTOCK_ALERT",
+    productId,
+    productTitle: productTitle || "Restocked Product",
+    variantId,
+    variantTitle: variantTitle || "Variant",
+    actionTaken:
+      notified.length > 0
+        ? `Back-in-stock email sent to ${notified.length} of ${subscribers.length} subscriber(s): ${notified.slice(0, 5).join(", ")}${notified.length > 5 ? ", …" : ""}`
+        : `Back-in-stock email failed for all ${subscribers.length} subscriber(s)`,
+    status: failed.length > 0 ? (notified.length > 0 ? "PARTIAL" : "FAILED") : "SUCCESS",
+    details: failed.length > 0 ? failed.slice(0, 5).join(" | ") : null,
+  }).catch(() => {});
+
+  return notified.length;
+}
+
+/**
+ * Manually dispatch restock alert email to a single subscriber
+ */
+export async function dispatchSingleRestockAlert(shop, { subscriberId, email, productTitle, variantTitle }) {
+  const cleanShop = normalizeShopDomain(shop);
+  const { sendCustomerBackInStockEmail } = await import("./email.server.js");
+
+  const productUrl = `https://${cleanShop}/collections/all`;
+
+  const result = await sendCustomerBackInStockEmail(cleanShop, {
+    customerEmail: email,
+    productTitle: productTitle || "Restocked Product",
+    variantTitle: variantTitle || "",
+    productUrl,
+  });
+
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+
+  const now = new Date();
+  if (isDbConfigured() && subscriberId) {
+    try {
+      await tryConnectDB();
+      await BackInStockSubscriber.updateOne(
+        { _id: subscriberId },
+        { $set: { status: "NOTIFIED", notifiedAt: now } }
+      );
+    } catch (err) {
+      console.warn("[dispatchSingleRestockAlert] DB update failed:", err.message);
+    }
+  }
+
+  const memIdx = inMemorySubscribers.findIndex(
+    (s) => (subscriberId && s._id === subscriberId) || (s.shop === cleanShop && s.email === email)
+  );
+  if (memIdx >= 0) {
+    inMemorySubscribers[memIdx].status = "NOTIFIED";
+    inMemorySubscribers[memIdx].notifiedAt = now;
+  }
+
+  await createAutomationLog({
+    shop: cleanShop,
+    eventType: "CUSTOMER_RESTOCK_ALERT",
+    productId: "MANUAL_DISPATCH",
+    productTitle: productTitle || "Restocked Product",
+    variantTitle: variantTitle || "Variant",
+    actionTaken: `Manual restock email dispatched to customer ${email} for product '${productTitle || "Restocked Product"}'.`,
+    status: "SUCCESS",
+  }).catch(() => {});
+
+  return { ok: true };
+}
+
+
+/**
+ * Create a Purchase Order (PO)
+ */
+export async function createPurchaseOrder(shop, { supplierName, supplierEmail, items }) {
+  if (!isDbConfigured() || !shop) return null;
+  await tryConnectDB();
+  const count = await PurchaseOrder.countDocuments({ shop });
+  const poNumber = `PO-${1000 + count + 1}`;
+
+  const po = await PurchaseOrder.create({
+    shop,
+    poNumber,
+    supplierName: supplierName || "Primary Supplier",
+    supplierEmail: supplierEmail || "",
+    items: items || [],
+    totalItems: (items || []).length,
+    status: "DRAFT",
+  });
+
+  await createAutomationLog({
+    shop,
+    eventType: "PURCHASE_ORDER_CREATED",
+    productTitle: `Purchase Order ${poNumber} generated`,
+    variantTitle: supplierName || "Supplier",
+    actionTaken: `Generated Purchase Order ${poNumber} for ${items?.length || 0} low-stock item(s). Target Supplier: ${supplierEmail || "N/A"}.`,
+    status: "SUCCESS",
+  }).catch(() => {});
+
+  return plain(po);
+}
+
+/**
+ * Get Purchase Orders for a shop
+ */
+export async function getPurchaseOrders(shop, limit = 50) {
+  if (!isDbConfigured() || !shop) return [];
+  try {
+    await tryConnectDB();
+    const pos = await PurchaseOrder.find({ shop }).sort({ createdAt: -1 }).limit(limit).lean();
+    return plainAll(pos);
+  } catch (err) {
+    console.warn("[getPurchaseOrders] Error loading POs:", err.message);
+    return [];
+  }
+}
+
+/**
+ * Update Purchase Order status
+ */
+export async function updatePurchaseOrderStatus(shop, poId, status) {
+  if (!isDbConfigured() || !shop) return null;
+  await tryConnectDB();
+  const updateData = { status };
+  if (status === "SENT") updateData.sentAt = new Date();
+  if (status === "RECEIVED") updateData.receivedAt = new Date();
+
+  const updated = await PurchaseOrder.findOneAndUpdate(
+    { shop, _id: poId },
+    { $set: updateData },
+    { returnDocument: "after" }
+  ).lean();
+  return plain(updated);
+}
+
+/**
+ * Get total automation action count for 5-star review prompt engine
+ */
+export async function getAutomationActionCount(shop) {
+  if (!isDbConfigured() || !shop) return 0;
+  try {
+    await tryConnectDB();
+    return await AutomationLog.countDocuments({ shop, status: "SUCCESS" });
+  } catch (err) {
+    return 0;
+  }
+}
+
+// Background scheduler ticker to process due restocks promptly (every 15s)
+if (typeof globalThis.__stockshield_restock_poller === "undefined") {
+  globalThis.__stockshield_restock_poller = setInterval(async () => {
+    try {
+      if (isDbConfigured()) {
+        await processDueScheduledRestocks({ limit: 50 });
+      }
+    } catch (err) {
+      // Quiet background check error catching
+    }
+  }, 15000);
+}
+
 
 

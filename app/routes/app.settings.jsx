@@ -14,32 +14,69 @@ import {
   updateSupportTicketStatus,
   syncStorefrontConfig,
   checkThemeAppEmbedEnabled,
+  getPurchaseOrders,
+  createPurchaseOrder,
+  updatePurchaseOrderStatus,
+  getBackInStockSubscribers,
+  dispatchSingleRestockAlert,
+  getAutomationActionCount,
+  isSupportAdminShop,
 } from "../models/inventory.server";
-import { getPlan } from "../utils/planLimits";
+import {
+  sendSupportTicketAdminEmail,
+  sendSupportTicketReplyEmail,
+} from "../models/email.server";
+import { getPlan, featureGate } from "../utils/planLimits";
+
+// Where merchant tickets are sent, and the address a merchant reaches by replying
+// to a support email. Kept in one place so the notice, the reply and the address
+// shown on the Support tab cannot drift apart.
+const SUPPORT_EMAIL = "sandeepptpss@gmail.com";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const url = new URL(request.url);
 
-  // Billing now lives on /app/plan, but this route used to activate a plan
-  // straight from `?charge_approved=true&plan=…` — a query string any merchant
-  // can type. The stored plan is reconciled with Shopify's own billing record
-  // instead, and this page never grants a tier.
   const { subscription } = await syncSubscriptionFromShopify(admin, session.shop);
 
   const settings = await getInventorySettings(session.shop);
-  const supportTickets = await getSupportTickets(session.shop, 50);
+  // The support desk answers tickets from every store, so it reads them all; a
+  // merchant reads only their own. getSupportTickets has always supported this —
+  // nothing had ever asked it for more than one shop.
+  const isSupportAdmin = isSupportAdminShop(session.shop);
+  const supportTickets = await getSupportTickets(isSupportAdmin ? "ALL" : session.shop, 50);
+  const purchaseOrders = await getPurchaseOrders(session.shop, 50);
+  const subscribers = await getBackInStockSubscribers(session.shop);
+  const actionCount = await getAutomationActionCount(session.shop);
   const embedEnabled = await checkThemeAppEmbedEnabled(admin);
   const initialTab = url.searchParams.get("tab") || "general";
+
+  // Also synced on load, not just on save: the config carries the app's own URL,
+  // which the restock form falls back to when the app proxy is not routing. That
+  // URL changes every time the dev tunnel restarts, and a merchant who never
+  // re-saves their settings would otherwise be left publishing a dead one. The
+  // write is skipped when nothing has changed, so a repeat load costs nothing.
+  await syncStorefrontConfig(admin, session.shop);
 
   return {
     shop: session.shop,
     settings,
     subscription,
     plan: getPlan(subscription?.plan),
+    // Resolved server-side from the same matrix the automation engine reads, so a
+    // panel can never claim a capability the engine would refuse to run.
+    gates: {
+      purchaseOrders: featureGate(subscription?.plan, "purchaseOrders"),
+      backInStockWidget: featureGate(subscription?.plan, "backInStockWidget"),
+      emailAlerts: featureGate(subscription?.plan, "emailAlerts"),
+    },
     supportTickets,
+    purchaseOrders,
+    subscribers,
+    actionCount,
     embedEnabled,
     initialTab,
+    isSupportAdmin,
   };
 };
 
@@ -48,12 +85,30 @@ export const action = async ({ request }) => {
   const formData = await request.formData();
   const intent = formData.get("intent");
 
+  // Resolved up front rather than beside the settings save it used to sit next to:
+  // the PO intents run before that point, so a merchant on a plan without them
+  // could post the form directly — the locked panel is UI, not enforcement.
+  const subscription = await getShopSubscription(session.shop);
+  const plan = getPlan(subscription?.plan);
+  const { features } = plan;
+
+  const denyUpgrade = (feature) => {
+    const gate = featureGate(plan.plan, feature);
+    return {
+      success: false,
+      type: "plan_locked",
+      feature,
+      requiredPlan: gate.requiredPlan,
+      message: gate.message,
+    };
+  };
+
   if (intent === "send_support_request") {
     const name = formData.get("name") || "Merchant";
     const email = formData.get("email") || session.shop;
     const topic = formData.get("topic") || "General Support";
     const message = formData.get("message") || "";
-    const supportEmail = "sandeepptpss@gmail.com";
+    const supportEmail = SUPPORT_EMAIL;
 
     const ticket = await createSupportTicket({
       shop: session.shop,
@@ -75,7 +130,19 @@ export const action = async ({ request }) => {
       status: "SUCCESS",
     });
 
-    const supportTickets = await getSupportTickets(session.shop, 50);
+    // The desk is told about the ticket, not left to discover it. The ticket is
+    // already saved, so a mail failure must not fail the merchant's submission.
+    sendSupportTicketAdminEmail(supportEmail, {
+      ...ticket,
+      shop: session.shop,
+      plan: plan.name,
+      supportResponse: plan.supportResponse,
+    }).catch((err) => console.warn("[support] New-ticket notice failed:", err.message));
+
+    const supportTickets = await getSupportTickets(
+      isSupportAdminShop(session.shop) ? "ALL" : session.shop,
+      50
+    );
 
     return {
       success: true,
@@ -87,13 +154,70 @@ export const action = async ({ request }) => {
     };
   }
 
+  if (intent === "dismiss_review_prompt") {
+    const updated = await updateInventorySettings(session.shop, { reviewPromptDismissed: true });
+    return { success: true, settings: updated, type: "dismiss_review" };
+  }
+
+  if (intent === "create_po") {
+    if (!features.purchaseOrders) return denyUpgrade("purchaseOrders");
+
+    const supplierName = formData.get("supplierName") || "Primary Supplier";
+    const supplierEmail = formData.get("supplierEmail") || "";
+    const itemsJson = formData.get("items") || "[]";
+    let items = [];
+    try { items = JSON.parse(itemsJson); } catch (e) {}
+
+    const po = await createPurchaseOrder(session.shop, { supplierName, supplierEmail, items });
+    const purchaseOrders = await getPurchaseOrders(session.shop, 50);
+    return { success: true, type: "create_po", po, purchaseOrders };
+  }
+
+  if (intent === "update_po_status") {
+    if (!features.purchaseOrders) return denyUpgrade("purchaseOrders");
+
+    const poId = formData.get("poId");
+    const status = formData.get("status") || "SENT";
+    await updatePurchaseOrderStatus(session.shop, poId, status);
+    const purchaseOrders = await getPurchaseOrders(session.shop, 50);
+    return { success: true, type: "update_po", purchaseOrders };
+  }
+
   if (intent === "reply_ticket") {
+    // Answering tickets is the support desk's job. The ticket id arrives in the
+    // form body, so without this check any store could post one that was never
+    // theirs — the ids are guessable and the update matched on id alone.
+    if (!isSupportAdminShop(session.shop)) {
+      console.warn(`[support] ${session.shop} attempted to answer a ticket without being the support desk`);
+      return {
+        success: false,
+        type: "support_forbidden",
+        message: "Only the StockShield support desk can answer tickets.",
+      };
+    }
+
     const ticketId = formData.get("ticketId");
     const status = formData.get("status") || "RESOLVED";
     const adminReply = formData.get("adminReply") || "";
 
     const updated = await updateSupportTicketStatus(ticketId, { status, adminReply });
-    const supportTickets = await getSupportTickets(session.shop, 50);
+
+    // No matching ticket means nothing was saved and nobody was emailed, so the
+    // desk must not be told the reply went out.
+    if (!updated) {
+      console.warn(`[support] No ticket matched ${ticketId}; nothing was updated`);
+      return {
+        success: false,
+        type: "ticket_reply_failed",
+        message: `No ticket found with id ${ticketId}. Nothing was saved.`,
+      };
+    }
+
+    sendSupportTicketReplyEmail(updated, SUPPORT_EMAIL).catch((err) =>
+      console.warn("[support] Reply notice failed:", err.message)
+    );
+
+    const supportTickets = await getSupportTickets("ALL", 50);
 
     return { success: true, type: "ticket_reply", updatedTicket: updated, supportTickets };
   }
@@ -101,10 +225,6 @@ export const action = async ({ request }) => {
   // Plan changes are handled by /app/plan, which is the only route that talks to
   // Shopify Billing. Leaving a second copy here meant two places could grant a
   // tier, and this one did it without verifying the charge.
-
-  const subscription = await getShopSubscription(session.shop);
-  const plan = getPlan(subscription?.plan);
-  const { features } = plan;
 
   if (intent === "save_email_settings") {
     const emailAlertsRaw = formData.get("enableEmailAlerts");
@@ -121,6 +241,38 @@ export const action = async ({ request }) => {
     const updated = await updateInventorySettings(session.shop, emailData);
 
     return { success: true, settings: updated, type: "save_email_settings" };
+  }
+
+  if (intent === "dispatch_restock_alert") {
+    const subscriberId = formData.get("subscriberId");
+    const customerEmail = formData.get("customerEmail");
+    const productTitle = formData.get("productTitle") || "Restocked Item";
+    const variantTitle = formData.get("variantTitle") || "Default Variant";
+
+    const result = await dispatchSingleRestockAlert(session.shop, {
+      subscriberId,
+      email: customerEmail,
+      productTitle,
+      variantTitle,
+    });
+
+    const updatedSubscribers = await getBackInStockSubscribers(session.shop);
+
+    if (result.ok) {
+      return {
+        success: true,
+        type: "dispatch_alert",
+        subscribers: updatedSubscribers,
+        message: `Restock alert email sent successfully to ${customerEmail}!`,
+      };
+    } else {
+      return {
+        success: false,
+        type: "dispatch_alert",
+        subscribers: updatedSubscribers,
+        message: `Failed to send email to ${customerEmail}: ${result.error || "Unknown error"}`,
+      };
+    }
   }
 
   const emailAlertsRaw = formData.get("enableEmailAlerts");
@@ -148,8 +300,97 @@ export const action = async ({ request }) => {
 };
 
 
+/**
+ * What a merchant sees in place of a feature their plan does not include.
+ *
+ * Deliberately shows the feature rather than hiding the tab: the merchant can see
+ * what they would get, and the upgrade target comes from the plan matrix, so a
+ * feature that moves tiers moves this prompt with it.
+ */
+/* eslint-disable react/prop-types -- route-local component; `gate` is the loader's
+   featureGate() result, whose shape planLimits.js already defines. */
+function PlanLockedPanel({ gate, title, description, bullets = [] }) {
+  return (
+    <div
+      className="table-card"
+      style={{
+        padding: "36px 28px",
+        textAlign: "center",
+        background: "linear-gradient(135deg, #f5f3ff 0%, #eef2ff 100%)",
+        border: "1px solid #c7d2fe",
+      }}
+    >
+      <div style={{ fontSize: "34px", marginBottom: "10px" }}>🔒</div>
+
+      <h2 style={{ fontSize: "20px", margin: "0 0 6px 0", color: "#1e1b4b" }}>{title}</h2>
+      <p style={{ margin: "0 auto 20px auto", fontSize: "13px", color: "#4c1d95", maxWidth: "560px", lineHeight: 1.5 }}>
+        {description}
+      </p>
+
+      {bullets.length > 0 && (
+        <ul
+          style={{
+            listStyle: "none",
+            padding: 0,
+            margin: "0 auto 22px auto",
+            maxWidth: "420px",
+            textAlign: "left",
+            display: "grid",
+            gap: "8px",
+          }}
+        >
+          {bullets.map((bullet) => (
+            <li key={bullet} style={{ display: "flex", gap: "8px", fontSize: "13px", color: "#3730a3" }}>
+              <span style={{ color: "#4f46e5", fontWeight: "bold" }}>✓</span>
+              <span>{bullet}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div
+        style={{
+          display: "inline-flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: "10px",
+          background: "#ffffff",
+          border: "1px solid #ddd6fe",
+          borderRadius: "12px",
+          padding: "18px 26px",
+        }}
+      >
+        <span style={{ fontSize: "13px", color: "#4c1d95" }}>
+          Included from the <strong>{gate.requiredPlanName}</strong> plan
+          {" "}(${gate.requiredPlanPrice}/month) — you are on <strong>{gate.currentPlan}</strong>.
+        </span>
+        <Link
+          to="/app/plan"
+          className="btn-primary"
+          style={{ textDecoration: "none", fontSize: "13px", padding: "8px 20px", background: "#4f46e5" }}
+        >
+          Upgrade to {gate.requiredPlanName} →
+        </Link>
+      </div>
+    </div>
+  );
+}
+/* eslint-enable react/prop-types */
+
 export default function Settings() {
-  const { shop, settings, plan, supportTickets: initialTickets, embedEnabled, initialTab } = useLoaderData();
+  const {
+    shop,
+    settings,
+    plan,
+    supportTickets: initialTickets,
+    purchaseOrders: initialPOs,
+    subscribers: initialSubscribers,
+    actionCount,
+    embedEnabled,
+    initialTab,
+    gates,
+    isSupportAdmin,
+  } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -160,6 +401,12 @@ export default function Settings() {
       setActiveTab(initialTab);
     }
   }, [initialTab]);
+
+  // PO & Subscriber States
+  const [poSupplierName, setPoSupplierName] = useState("");
+  const [poSupplierEmail, setPoSupplierEmail] = useState("");
+  const [poItemTitle, setPoItemTitle] = useState("");
+  const [poTargetQty, setPoTargetQty] = useState("50");
 
   // Support Form State
   const [supportName, setSupportName] = useState("");
@@ -201,26 +448,114 @@ export default function Settings() {
       setActiveTicket(null);
       setReplyText("");
     }
+    // The action refuses a gated write even when the UI let the form through —
+    // a stale tab left open across a downgrade, say. Surface it rather than
+    // leaving the merchant looking at a form that quietly did nothing.
+    if (fetcher.data?.type === "dispatch_alert") {
+      if (fetcher.data?.success) {
+        shopify?.toast?.show?.(fetcher.data.message || "Restock alert email sent successfully!");
+      } else {
+        shopify?.toast?.show?.(fetcher.data.message || "Failed to send restock alert email.", { isError: true });
+      }
+    }
+    if (fetcher.data?.type === "ticket_reply_failed") {
+      shopify?.toast?.show?.(fetcher.data.message, { isError: true });
+    }
+    if (fetcher.data?.type === "support_forbidden") {
+      shopify?.toast?.show?.(fetcher.data.message, { isError: true });
+    }
+    if (fetcher.data?.type === "plan_locked") {
+      shopify?.toast?.show?.(fetcher.data.message, { isError: true });
+    }
   }, [fetcher.data, shopify]);
+
+  const poGate = gates?.purchaseOrders || { allowed: true };
+  const restockGate = gates?.backInStockWidget || { allowed: true };
+  const emailGate = gates?.emailAlerts || { allowed: true };
 
   const isSavingThresholds = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_thresholds";
   const isSavingEmail = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "save_email_settings";
   const handleCopyEmail = () => {
-    navigator.clipboard.writeText("sandeepptpss@gmail.com");
-    shopify?.toast?.show?.("Copied email: sandeepptpss@gmail.com");
+    navigator.clipboard.writeText(SUPPORT_EMAIL);
+    shopify?.toast?.show?.(`Copied email: ${SUPPORT_EMAIL}`);
   };
 
   const tickets = fetcher.data?.supportTickets || initialTickets || [];
+  const posList = fetcher.data?.purchaseOrders || initialPOs || [];
+  const subscribersList = fetcher.data?.subscribers || initialSubscribers || [];
 
   return (
     <div className="stock-container" style={{ paddingBottom: "40px" }}>
       <div className="stock-header">
         <div>
-          <h1>App Settings &amp; Merchant Desk</h1>
-          <p>Manage store preferences, billing subscriptions &amp; merchant support tickets</p>
+          <h1>App Settings &amp; Merchant Operations</h1>
+          <p>Manage store rules, Purchase Orders (POs), Customer Restock Alerts &amp; Merchant Support</p>
         </div>
         <span className="stock-badge-active">Connected: {shop}</span>
       </div>
+
+      {/* 5-Star Review Prompt Engine Banner */}
+      {actionCount >= 5 && !settings?.reviewPromptDismissed && (
+        <div
+          className="table-card"
+          style={{
+            padding: "20px 24px",
+            marginBottom: "24px",
+            background: "linear-gradient(135deg, #fef3c7 0%, #fffbeb 100%)",
+            border: "1px solid #fcd34d",
+            borderRadius: "14px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "16px",
+            boxShadow: "0 4px 12px rgba(217, 119, 6, 0.12)",
+          }}
+        >
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+              <span style={{ fontSize: "18px" }}>⭐ ⭐ ⭐ ⭐ ⭐</span>
+              <h3 style={{ margin: 0, fontSize: "16px", color: "#92400e", fontWeight: "700" }}>
+                StockShield Automated {actionCount}+ Inventory Actions!
+              </h3>
+            </div>
+            <p style={{ margin: 0, fontSize: "13px", color: "#78350f" }}>
+              StockShield is actively protecting your store from stockouts and sold-out products. Would you mind leaving a quick 5-star review on the Shopify App Store?
+            </p>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <a
+              href="https://apps.shopify.com"
+              target="_blank"
+              rel="noreferrer"
+              className="btn-primary"
+              style={{
+                background: "#d97706",
+                borderColor: "#b45309",
+                color: "#ffffff",
+                textDecoration: "none",
+                fontWeight: "700",
+                fontSize: "13px",
+                padding: "8px 16px",
+                borderRadius: "8px",
+              }}
+            >
+              Leave 5-Star Review ⭐
+            </a>
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="dismiss_review_prompt" />
+              <button
+                type="submit"
+                className="btn-secondary"
+                style={{ fontSize: "12px", padding: "8px 14px", color: "#78350f" }}
+              >
+                Dismiss
+              </button>
+            </fetcher.Form>
+          </div>
+        </div>
+      )}
 
       {/* Navigation Tabs */}
       <div
@@ -229,6 +564,7 @@ export default function Settings() {
           gap: "8px",
           borderBottom: "1px solid var(--border-color)",
           marginBottom: "24px",
+          flexWrap: "wrap",
         }}
       >
         <button
@@ -244,7 +580,55 @@ export default function Settings() {
             cursor: "pointer",
           }}
         >
-          General Preferences &amp; Setup
+          General Preferences &amp; Rules
+        </button>
+
+        <button
+          onClick={() => setActiveTab("po")}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "po" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "po" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "po" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
+        >
+          Purchase Orders (POs) {poGate.allowed ? "📄" : "🔒"}
+          {poGate.allowed && posList.length > 0 && (
+            <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
+              {posList.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab("subscribers")}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "subscribers" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "subscribers" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "subscribers" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
+        >
+          Customer Restock Alerts {restockGate.allowed ? "📩" : "🔒"}
+          {restockGate.allowed && subscribersList.length > 0 && (
+            <span style={{ background: "#fef3c7", color: "#92400e", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
+              {subscribersList.length}
+            </span>
+          )}
         </button>
 
         <button
@@ -263,17 +647,9 @@ export default function Settings() {
             gap: "6px",
           }}
         >
-          Support &amp; Help Desk
+          Support &amp; Help Desk 🎧
           {tickets.length > 0 && (
-            <span
-              style={{
-                background: "#e0e7ff",
-                color: "#3730a3",
-                padding: "2px 8px",
-                borderRadius: "12px",
-                fontSize: "11px",
-              }}
-            >
+            <span style={{ background: "#e0e7ff", color: "#3730a3", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {tickets.length}
             </span>
           )}
@@ -484,10 +860,11 @@ export default function Settings() {
                 >
                   <span style={{ fontSize: "13px", color: "#3730a3" }}>
                     Merchant email notifications are not included in the{" "}
-                    <strong>{plan?.name}</strong> plan — controls are disabled until you upgrade to a plan that includes email alerts.
+                    <strong>{plan?.name}</strong> plan — controls are disabled until you upgrade to{" "}
+                    <strong>{emailGate.requiredPlanName}</strong> (${emailGate.requiredPlanPrice}/month).
                   </span>
                   <Link to="/app/plan" className="btn-primary" style={{ textDecoration: "none", fontSize: "13px", padding: "6px 14px" }}>
-                    Upgrade to Growth →
+                    Upgrade to {emailGate.requiredPlanName} →
                   </Link>
                 </div>
               )}
@@ -519,11 +896,11 @@ export default function Settings() {
                       name="alertEmail"
                       defaultValue={settings.alertEmail || ""}
                       className="form-input"
-                      placeholder={`Default: ${shop}`}
+                      placeholder="e.g. merchant@yourstore.com"
                       disabled={!plan?.features?.emailAlerts}
                     />
                     <span style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px", display: "block" }}>
-                      Target inbox for out-of-stock and restock alerts. Leave blank to default to your myshopify store handle.
+                      Target email inbox for receiving out-of-stock and restock alert notifications.
                     </span>
                   </div>
 
@@ -580,7 +957,326 @@ export default function Settings() {
 
 
 
-      {/* TAB 3: SUPPORT & HELP DESK */}
+      {/* TAB 2: PURCHASE ORDERS (POs) GENERATOR */}
+      {activeTab === "po" && !poGate.allowed && (
+        <PlanLockedPanel
+          gate={poGate}
+          title="Supplier Purchase Orders"
+          description="Turn your low-stock items into an official Purchase Order and send the restock feed straight to your supplier — without leaving Shopify."
+          bullets={[
+            "Compile low-stock items into a numbered PO",
+            "Email the restock feed to your supplier in one click",
+            "Track dispatch and stock-received status per PO",
+          ]}
+        />
+      )}
+
+      {activeTab === "po" && poGate.allowed && (
+        <>
+          {/* GENERATE NEW PO FORM */}
+          <div className="table-card" style={{ padding: "24px", marginBottom: "24px" }}>
+            <div style={{ marginBottom: "20px" }}>
+              <h2 style={{ fontSize: "18px", margin: "0 0 4px 0", color: "#1e1b4b" }}>
+                Generate Supplier Purchase Order (PO)
+              </h2>
+              <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
+                Automatically compile low-stock items into an official Purchase Order and email supplier restock feeds.
+              </p>
+            </div>
+
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="create_po" />
+              <input
+                type="hidden"
+                name="items"
+                value={JSON.stringify([
+                  {
+                    productId: "manual-item",
+                    productTitle: poItemTitle || "Low Stock Inventory Batch",
+                    reorderQty: Number(poTargetQty) || 50,
+                  },
+                ])}
+              />
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px", marginBottom: "18px" }}>
+                <div className="form-group">
+                  <label className="form-label" htmlFor="po-supplier-name">Supplier Name</label>
+                  <input
+                    id="po-supplier-name"
+                    type="text"
+                    name="supplierName"
+                    required
+                    placeholder="e.g. Apex Global Wholesalers"
+                    value={poSupplierName}
+                    onChange={(e) => setPoSupplierName(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" htmlFor="po-supplier-email">Supplier Contact Email</label>
+                  <input
+                    id="po-supplier-email"
+                    type="email"
+                    name="supplierEmail"
+                    required
+                    placeholder="orders@supplier.com"
+                    value={poSupplierEmail}
+                    onChange={(e) => setPoSupplierEmail(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" htmlFor="po-item-title">Item Batch / SKU Notes</label>
+                  <input
+                    id="po-item-title"
+                    type="text"
+                    placeholder="e.g. Fall Stock Restock Batch"
+                    value={poItemTitle}
+                    onChange={(e) => setPoItemTitle(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" htmlFor="po-target-qty">Target Reorder Qty</label>
+                  <input
+                    id="po-target-qty"
+                    type="number"
+                    min="1"
+                    value={poTargetQty}
+                    onChange={(e) => setPoTargetQty(e.target.value)}
+                    className="form-input"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button type="submit" className="btn-primary" style={{ background: "#4f46e5" }}>
+                  📄 Generate Purchase Order (PO)
+                </button>
+              </div>
+            </fetcher.Form>
+          </div>
+
+          {/* PURCHASE ORDERS TABLE */}
+          <div className="table-card">
+            <div className="table-header" style={{ padding: "20px 24px", borderBottom: "1px solid var(--border-color)" }}>
+              <h3>Generated Supplier Purchase Orders</h3>
+              <p>Track created POs, dispatch status, and fulfillment updates</p>
+            </div>
+
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>PO Number</th>
+                  <th>Supplier</th>
+                  <th>Contact Email</th>
+                  <th>Items Count</th>
+                  <th>Status</th>
+                  <th>Created Date</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {posList.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} style={{ textAlign: "center", padding: "32px", color: "var(--text-muted)" }}>
+                      No Purchase Orders generated yet. Use the form above to generate your first PO.
+                    </td>
+                  </tr>
+                ) : (
+                  posList.map((po) => (
+                    <tr key={po.id || po.poNumber}>
+                      <td style={{ fontWeight: "700", color: "#4f46e5" }}>{po.poNumber}</td>
+                      <td style={{ fontWeight: "600" }}>{po.supplierName}</td>
+                      <td>{po.supplierEmail || "N/A"}</td>
+                      <td>{po.totalItems || po.items?.length || 1} Item(s)</td>
+                      <td>
+                        {po.status === "DRAFT" && <span className="badge badge-warning">Draft</span>}
+                        {po.status === "SENT" && <span className="badge badge-warning" style={{ background: "#dbeafe", color: "#1e40af" }}>Dispatched / Sent</span>}
+                        {po.status === "RECEIVED" && <span className="badge badge-healthy">Stock Received</span>}
+                      </td>
+                      <td>{po.createdAt ? new Date(po.createdAt).toLocaleDateString() : "Today"}</td>
+                      <td>
+                        <div style={{ display: "flex", gap: "6px" }}>
+                          {po.status === "DRAFT" && (
+                            <fetcher.Form method="post" style={{ display: "inline" }}>
+                              <input type="hidden" name="intent" value="update_po_status" />
+                              <input type="hidden" name="poId" value={po.id} />
+                              <input type="hidden" name="status" value="SENT" />
+                              <button type="submit" className="btn-primary" style={{ padding: "4px 10px", fontSize: "11px", background: "#2563eb" }}>
+                                Mark Sent 📩
+                              </button>
+                            </fetcher.Form>
+                          )}
+                          {po.status === "SENT" && (
+                            <fetcher.Form method="post" style={{ display: "inline" }}>
+                              <input type="hidden" name="intent" value="update_po_status" />
+                              <input type="hidden" name="poId" value={po.id} />
+                              <input type="hidden" name="status" value="RECEIVED" />
+                              <button type="submit" className="btn-primary" style={{ padding: "4px 10px", fontSize: "11px", background: "#059669" }}>
+                                Mark Received ✓
+                              </button>
+                            </fetcher.Form>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const mailUrl = `mailto:${encodeURIComponent(po.supplierEmail || "")}?subject=${encodeURIComponent(`Purchase Order ${po.poNumber}`)}&body=${encodeURIComponent(`Dear Supplier,\n\nPlease process Purchase Order ${po.poNumber} for our store.\n\nThank you!`)}`;
+                              if (window.top && window.top !== window) {
+                                window.top.location.href = mailUrl;
+                              } else {
+                                window.open(mailUrl, "_blank");
+                              }
+                            }}
+                            className="btn-secondary"
+                            style={{ padding: "4px 10px", fontSize: "11px", textDecoration: "none", cursor: "pointer" }}
+                          >
+                            Email Supplier 📩
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* TAB 3: CUSTOMER RESTOCK ALERTS SUBSCRIBERS */}
+      {activeTab === "subscribers" && !restockGate.allowed && (
+        <PlanLockedPanel
+          gate={restockGate}
+          title="Customer Restock Alerts"
+          description="Let shoppers ask to be told when a sold-out product returns, and email them automatically the moment it is back in stock."
+          bullets={[
+            "Storefront \u201cNotify me when back in stock\u201d widget",
+            "Automatic customer emails fired on restock",
+            "A live queue of who is waiting on which product",
+          ]}
+        />
+      )}
+
+      {activeTab === "subscribers" && restockGate.allowed && (
+        <>
+          <div className="table-card" style={{ padding: "24px", marginBottom: "24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
+              <div>
+                <h2 style={{ fontSize: "18px", margin: "0 0 4px 0", color: "#1e1b4b" }}>
+                  Storefront Restock Subscribers Engine
+                </h2>
+                <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
+                  Customers who submitted "Notify Me When Back in Stock" on sold-out products.
+                </p>
+              </div>
+              <div style={{ background: "#ecfdf5", padding: "8px 14px", borderRadius: "10px", border: "1px solid #a7f3d0" }}>
+                <span style={{ fontSize: "13px", fontWeight: "700", color: "#065f46" }}>
+                  Active Subscriber Queue: {subscribersList.length} Customer(s)
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="table-card">
+            <div className="table-header" style={{ padding: "20px 24px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
+              <div>
+                <h3 style={{ margin: "0 0 4px 0", fontSize: "16px", color: "#1e1b4b" }}>Customer Restock Notification Queue</h3>
+                <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
+                  Automated emails fire instantly when items are restocked in Shopify (0 &rarr; &gt;0 inventory).
+                </p>
+              </div>
+              <span className="badge badge-healthy" style={{ background: "#ecfdf5", color: "#047857", padding: "6px 14px", borderRadius: "20px", fontWeight: "600" }}>
+                Active Subscriber Queue: {subscribersList.length} Customer(s)
+              </span>
+            </div>
+
+            <div style={{ background: "#f8fafc", padding: "12px 24px", borderBottom: "1px solid var(--border-color)", fontSize: "13px", color: "#475569", lineHeight: "1.5" }}>
+              💡 <strong>How Restock Alerts Work:</strong> Emails are automatically dispatched to waiting customers as soon as stock levels for their requested item increase above zero in your store. You can also click <strong>"Send Alert Now"</strong> below to manually trigger the notification email anytime.
+            </div>
+
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Customer Email</th>
+                  <th>Product Requested</th>
+                  <th>Variant</th>
+                  <th>Status</th>
+                  <th>Subscribed Date</th>
+                  <th>Alert Dispatched</th>
+                  <th style={{ textAlign: "right" }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {subscribersList.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} style={{ textAlign: "center", padding: "32px", color: "var(--text-muted)" }}>
+                      No customer restock requests captured yet. Ensure the "Notify Me When Back in Stock" app embed block is active in your Shopify Theme Editor.
+                    </td>
+                  </tr>
+                ) : (
+                  subscribersList.map((sub) => {
+                    const subId = sub.id || sub._id || "";
+                    const isDispatchingThis = fetcher.state === "submitting" && fetcher.formData?.get("intent") === "dispatch_restock_alert" && fetcher.formData?.get("subscriberId") === String(subId);
+                    return (
+                      <tr key={subId || `${sub.email}-${sub.productId}`}>
+                        <td style={{ fontWeight: "600", color: "#1e293b" }}>{sub.email}</td>
+                        <td style={{ fontWeight: "600" }}>{sub.productTitle || sub.productId}</td>
+                        <td>{sub.variantTitle || "Default Variant"}</td>
+                        <td>
+                          {sub.status === "SUBSCRIBED" ? (
+                            <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e" }}>
+                              Waiting for Restock
+                            </span>
+                          ) : (
+                            <span className="badge badge-healthy" style={{ background: "#dcfce7", color: "#15803d" }}>
+                              Notified ✓
+                            </span>
+                          )}
+                        </td>
+                        <td>{sub.createdAt ? new Date(sub.createdAt).toLocaleDateString() : "Recent"}</td>
+                        <td>{sub.notifiedAt ? new Date(sub.notifiedAt).toLocaleDateString() : "Pending Restock"}</td>
+                        <td style={{ textAlign: "right" }}>
+                          <fetcher.Form method="post">
+                            <input type="hidden" name="intent" value="dispatch_restock_alert" />
+                            <input type="hidden" name="subscriberId" value={subId} />
+                            <input type="hidden" name="customerEmail" value={sub.email || ""} />
+                            <input type="hidden" name="productTitle" value={sub.productTitle || ""} />
+                            <input type="hidden" name="variantTitle" value={sub.variantTitle || ""} />
+                            <button
+                              type="submit"
+                              disabled={isDispatchingThis}
+                              className="btn-secondary"
+                              style={{
+                                padding: "5px 12px",
+                                fontSize: "12px",
+                                background: sub.status === "SUBSCRIBED" ? "#2563eb" : "#f1f5f9",
+                                color: sub.status === "SUBSCRIBED" ? "#ffffff" : "#475569",
+                                border: sub.status === "SUBSCRIBED" ? "none" : "1px solid #cbd5e1",
+                                cursor: isDispatchingThis ? "wait" : "pointer",
+                                opacity: isDispatchingThis ? 0.7 : 1,
+                                borderRadius: "6px",
+                                fontWeight: "600",
+                              }}
+                            >
+                              {isDispatchingThis ? "Sending..." : sub.status === "SUBSCRIBED" ? "Send Alert Now 📩" : "Resend Alert 📩"}
+                            </button>
+                          </fetcher.Form>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* TAB 4: SUPPORT & HELP DESK */}
       {activeTab === "support" && (
         <>
           {/* MERCHANT SUPPORT FORM */}
@@ -597,7 +1293,7 @@ export default function Settings() {
 
               <div style={{ display: "flex", alignItems: "center", gap: "8px", background: "#f8fafc", padding: "8px 12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
                 <span style={{ fontSize: "12px", color: "#475569" }}>
-                  Support Email: <strong>sandeepptpss@gmail.com</strong>
+                  Support Email: <strong>{SUPPORT_EMAIL}</strong>
                 </span>
                 <button
                   type="button"
@@ -608,6 +1304,39 @@ export default function Settings() {
                   Copy Email
                 </button>
               </div>
+            </div>
+
+            {/* Support is open to every plan; the response target is not. Stating the
+                tier the merchant actually pays for keeps the pricing table honest
+                and sets the expectation before they file a ticket. */}
+            <div
+              style={{
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                borderRadius: "10px",
+                padding: "12px 16px",
+                marginBottom: "20px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: "10px",
+              }}
+            >
+              <span style={{ fontSize: "13px", color: "#334155" }}>
+                Your support tier: <strong>{plan?.support}</strong>
+                {plan?.supportResponse && (
+                  <span style={{ color: "var(--text-muted)" }}> — {plan.supportResponse}</span>
+                )}
+              </span>
+              {plan?.plan !== "ENTERPRISE" && (
+                <Link
+                  to="/app/plan"
+                  style={{ fontSize: "12px", fontWeight: "600", color: "#4f46e5", textDecoration: "none" }}
+                >
+                  Compare support tiers →
+                </Link>
+              )}
             </div>
 
             {lastTicket && (
@@ -622,7 +1351,7 @@ export default function Settings() {
                   fontSize: "13px",
                 }}
               >
-                <strong>Ticket Submitted: {lastTicket.ticketId}</strong> — Our support team at <strong>sandeepptpss@gmail.com</strong> has received your request.
+                <strong>Ticket Submitted: {lastTicket.ticketId}</strong> — Our support team at <strong>{SUPPORT_EMAIL}</strong> has received your request.
               </div>
             )}
 
@@ -709,10 +1438,12 @@ export default function Settings() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "12px" }}>
               <div>
                 <h2 style={{ fontSize: "18px", margin: "0 0 4px 0", color: "#1e1b4b" }}>
-                  Support Ticket Inbox &amp; Solution History
+                  {isSupportAdmin ? "Support Desk — All Stores" : "Your Support Tickets"}
                 </h2>
                 <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
-                  Review submitted support tickets, track resolutions, and respond to merchant queries.
+                  {isSupportAdmin
+                    ? "Every ticket submitted across all merchant stores. Answer here and the merchant is emailed automatically."
+                    : "The tickets you have submitted, and our replies. We will also email you when we answer."}
                 </p>
               </div>
               <span style={{ background: "#e0e7ff", color: "#3730a3", padding: "4px 12px", borderRadius: "20px", fontSize: "12px", fontWeight: "700" }}>
@@ -724,18 +1455,21 @@ export default function Settings() {
               <thead>
                 <tr>
                   <th>Ticket ID</th>
-                  <th>Merchant / Email</th>
+                  {isSupportAdmin && <th>Store</th>}
+                  <th>{isSupportAdmin ? "Merchant / Email" : "Submitted By"}</th>
                   <th>Topic</th>
                   <th>Query Message</th>
                   <th>Status</th>
-                  <th>Solution / Action</th>
+                  {isSupportAdmin && <th>Solution / Action</th>}
                 </tr>
               </thead>
               <tbody>
                 {tickets.length === 0 ? (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: "center", padding: "30px", color: "var(--text-muted)", fontSize: "13px" }}>
-                      No support tickets submitted yet. Use the form above to submit your first query.
+                    <td colSpan={isSupportAdmin ? 7 : 5} style={{ textAlign: "center", padding: "30px", color: "var(--text-muted)", fontSize: "13px" }}>
+                      {isSupportAdmin
+                        ? "No tickets have been submitted by any store yet."
+                        : "You have not submitted any support tickets yet. Use the form above to send us your first query."}
                     </td>
                   </tr>
                 ) : (
@@ -749,6 +1483,9 @@ export default function Settings() {
                             {t.ticketId}
                           </code>
                         </td>
+                        {isSupportAdmin && (
+                          <td style={{ fontSize: "12px", fontWeight: "600", color: "#4338ca" }}>{t.shop}</td>
+                        )}
                         <td>
                           <strong>{t.name}</strong>
                           <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>{t.email}</div>
@@ -769,30 +1506,32 @@ export default function Settings() {
                           {t.status === "IN_PROGRESS" && <span className="badge badge-warning">In Progress</span>}
                           {t.status === "RESOLVED" && <span className="badge badge-healthy">Resolved</span>}
                         </td>
-                        <td>
-                          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                            <button
-                              className="btn-primary"
-                              style={{ padding: "4px 8px", fontSize: "12px" }}
-                              onClick={() => {
-                                setActiveTicket(t);
-                                setReplyText(t.adminReply || "");
-                                setReplyStatus(t.status || "RESOLVED");
-                              }}
-                            >
-                              Provide Solution
-                            </button>
-                            <a
-                              href={replyMailto}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="btn-secondary"
-                              style={{ padding: "4px 8px", fontSize: "12px", textDecoration: "none" }}
-                            >
-                              Reply Email
-                            </a>
-                          </div>
-                        </td>
+                        {isSupportAdmin && (
+                          <td>
+                            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                              <button
+                                className="btn-primary"
+                                style={{ padding: "4px 8px", fontSize: "12px" }}
+                                onClick={() => {
+                                  setActiveTicket(t);
+                                  setReplyText(t.adminReply || "");
+                                  setReplyStatus(t.status || "RESOLVED");
+                                }}
+                              >
+                                {t.adminReply ? "Edit Solution" : "Provide Solution"}
+                              </button>
+                              <a
+                                href={replyMailto}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="btn-secondary"
+                                style={{ padding: "4px 8px", fontSize: "12px", textDecoration: "none" }}
+                              >
+                                Reply Email
+                              </a>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     );
                   })

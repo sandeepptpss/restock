@@ -21,6 +21,7 @@ import {
   restoreProductVisibility,
   INVENTORY_TRANSITION,
   checkThemeAppEmbedEnabled,
+  notifyCustomerRestock,
 } from "../models/inventory.server";
 import { sendMerchantInventoryEmail } from "../models/email.server";
 
@@ -134,6 +135,7 @@ export const action = async ({ request }) => {
               product {
                 id
                 title
+                handle
                 status
                 tags
                 # The trace older versions of the ACTIVE_HIDDEN mode left behind,
@@ -300,7 +302,10 @@ export const action = async ({ request }) => {
         console.log(
           `[Webhook] ${product.title} is ${product.status} (manually set by merchant) — skipping stockout automations`
         );
-        return;
+        // A bare `return` here left the action resolving to undefined instead of a
+        // Response, which React Router treats as an error and Shopify as a failed
+        // delivery — the webhook was then retried and eventually unsubscribed.
+        return new Response(null, { status: 200 });
       }
 
       // Gated on auto-fill alone: with it off the job would carry a target of 0
@@ -435,6 +440,17 @@ export const action = async ({ request }) => {
         }).catch((emailErr) => console.error("[Webhook] Non-blocking restock email alert error:", emailErr));
       }
 
+      // 📩 Notify customer subscribers who requested "Notify Me When Back in Stock".
+      // Awaited, unlike the merchant alert: on a serverless host the response ends
+      // the invocation, and a detached send would be cut off mid-flight.
+      await notifyCustomerRestock(shop, {
+        productId: product.id,
+        variantId: variant.id,
+        productTitle: product.title,
+        variantTitle: variant.title,
+        productHandle: product.handle,
+      }).catch((subErr) => console.error("[Webhook] Customer restock alert error:", subErr));
+
       // This variant is buyable again, so the auto-fill queued for *it* is
       // obsolete. Scoped to the variant: its siblings' pending refills are still
       // needed and cancelling them here is what stranded them at 0.
@@ -507,23 +523,24 @@ export const action = async ({ request }) => {
             jobType: "UNHIDE",
           });
 
-          logsToCreate.push({
-            shop,
-            eventType: "SCHEDULED_UNHIDE",
-            productId: product.id,
-            productTitle: product.title,
-            variantId: variant.id,
-            variantTitle: variant.title,
-            inventoryItemId: invData.id,
-            sku: variant.sku,
-            quantity: changedVariantQuantity,
-            actionTaken: `[Webhook Trigger] Restocked — auto-unhide scheduled in ${settings.restockDelayValue} ${settings.restockDelayUnit} (${variantSummary})`,
-            status: job ? "SUCCESS" : "FAILED",
-            details: job
-              ? `Tag '${tagToRemove}' removal and the ${settings.visibilityMode} restore run at ${new Date(Date.now() + unhideDelayMs).toISOString()}`
-              : "Could not persist the scheduled unhide job",
-          });
-          return;
+          if (job) {
+            logsToCreate.push({
+              shop,
+              eventType: "SCHEDULED_UNHIDE",
+              productId: product.id,
+              productTitle: product.title,
+              variantId: variant.id,
+              variantTitle: variant.title,
+              inventoryItemId: invData.id,
+              sku: variant.sku,
+              quantity: changedVariantQuantity,
+              actionTaken: `[Webhook Trigger] Restocked — auto-unhide scheduled in ${settings.restockDelayValue} ${settings.restockDelayUnit} (${variantSummary})`,
+              status: "SUCCESS",
+              details: `Tag '${tagToRemove}' removal and the ${settings.visibilityMode} restore run at ${new Date(Date.now() + unhideDelayMs).toISOString()}`,
+            });
+            return;
+          }
+          console.warn("[Webhook] Could not persist scheduled unhide job; unhiding immediately as fallback.");
         }
 
         if (tagNeedsRemoving) {
