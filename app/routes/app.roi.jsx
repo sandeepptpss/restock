@@ -175,9 +175,25 @@ export default function RoiPage() {
           </div>
         </div>
 
-        <div style={{ marginTop: "20px", display: "flex", justifyContent: "flex-end", gap: "12px" }}>
-          <Link to="/app/plan" className="btn-primary" style={{ fontSize: "13px", padding: "10px 18px" }}>
-            Manage Subscription &amp; Plan →
+        <div style={{ marginTop: "20px", display: "flex", justifyContent: "flex-end" }}>
+          <Link
+            to="/app/plan"
+            className="btn-primary"
+            style={{
+              background: "#312e81",
+              color: "#ffffff",
+              padding: "9px 18px",
+              borderRadius: "8px",
+              fontSize: "13px",
+              fontWeight: "600",
+              textDecoration: "none",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              transition: "all 0.15s ease",
+            }}
+          >
+            Manage Subscription &amp; Plan &rarr;
           </Link>
         </div>
       </div>
