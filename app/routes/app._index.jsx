@@ -14,6 +14,7 @@ import {
   createAutomationLog,
   hasSuccessfulAutomation,
   updateInventorySettings,
+  getRoiMetrics,
 } from "../models/inventory.server";
 import { checkPlanLimitStatus, trialStatus, PLAN_NAMES, PLAN_PRICES, TRIAL_DAYS } from "../utils/planLimits";
 
@@ -54,6 +55,7 @@ export const loader = async ({ request }) => {
   const hasAutomationSuccess =
     (await hasSuccessfulAutomation(shop)) ||
     (recentLogs && recentLogs.some((l) => l.status === "SUCCESS"));
+  const roi = await getRoiMetrics(shop, inventoryData.items);
 
   return {
     shop,
@@ -66,6 +68,7 @@ export const loader = async ({ request }) => {
     activatedPlan,
     hasAutomationSuccess,
     trial: trialStatus(subscription),
+    roi,
   };
 };
 
@@ -121,7 +124,7 @@ export const action = async ({ request }) => {
 };
 
 export default function Dashboard() {
-  const { shop, items, settings, primaryLocationId, recentLogs, subscription, chargeApproved, activatedPlan, hasAutomationSuccess, trial } = useLoaderData();
+  const { shop, items, settings, primaryLocationId, recentLogs, subscription, chargeApproved, activatedPlan, hasAutomationSuccess, trial, roi } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -133,6 +136,7 @@ export default function Dashboard() {
   const [dismissChecklist, setDismissChecklist] = useState(false);
   const [showSuccessBanner, setShowSuccessBanner] = useState(Boolean(chargeApproved && activatedPlan));
   const [dismissedReviewPrompt, setDismissedReviewPrompt] = useState(false);
+  const [showRoiBreakdown, setShowRoiBreakdown] = useState(false);
 
   useEffect(() => {
     if (typeof window !== "undefined" && window.localStorage.getItem("stockshield_review_dismissed") === "true") {
@@ -623,38 +627,179 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Lightweight Onboarding Pill (Collapsed / Dismissible) */}
-      {!dismissChecklist && (
-        <div
+      {/* Active Automation Rules Summary Card */}
+      <div
+        style={{
+          background: "#ffffff",
+          border: "1px solid #e2e8f0",
+          borderRadius: "14px",
+          padding: "16px 20px",
+          marginBottom: "20px",
+          boxShadow: "0 2px 8px rgba(0, 0, 0, 0.04)",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "16px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "20px", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: "11px", fontWeight: "700", color: "#64748b", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Active Automation Rules Engine
+            </div>
+            <div style={{ fontSize: "14px", fontWeight: "700", color: "#0f172a", marginTop: "2px" }}>
+              {settings?.hideMode === "HIDE_ALL_OOS" ? "Hide when ALL variants read 0" : "Hide when ANY variant reaches 0"}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: "16px", paddingLeft: "16px", borderLeft: "1px solid #e2e8f0", flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: "11px", color: "#64748b" }}>Safety Limit</div>
+              <div style={{ fontSize: "13px", fontWeight: "700", color: "#16a34a" }}>
+                {settings?.defaultLowStockLimit ?? 5} units
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: "11px", color: "#64748b" }}>Visibility Mode</div>
+              <div style={{ fontSize: "13px", fontWeight: "700", color: "#4f46e5" }}>
+                {settings?.visibilityMode || "ACTIVE_HIDDEN"}
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: "11px", color: "#64748b" }}>Auto-Tagging</div>
+              <div style={{ fontSize: "13px", fontWeight: "700", color: "#0f172a" }}>
+                &apos;{settings?.outOfStockTag || "out-of-stock"}&apos;
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: "11px", color: "#64748b" }}>Restock Delay</div>
+              <div style={{ fontSize: "13px", fontWeight: "700", color: "#d97706" }}>
+                {settings?.restockDelayMinutes ? `${settings.restockDelayMinutes} mins` : "Immediate"}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <Link
+          to="/app/rules"
           style={{
-            background: "#f8fafc",
-            border: "1px solid #e2e8f0",
-            borderRadius: "10px",
-            padding: "10px 16px",
-            marginBottom: "20px",
-            display: "flex",
-            justify: "space-between",
-            alignItems: "center",
+            background: "#f1f5f9",
+            color: "#334155",
+            border: "1px solid #cbd5e1",
+            padding: "8px 14px",
+            borderRadius: "8px",
             fontSize: "12px",
-            color: "#475569",
+            fontWeight: "600",
+            textDecoration: "none",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "4px",
+            whiteSpace: "nowrap",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
-            <span style={{ fontWeight: "700", color: "#1e293b" }}>
-              Setup Verified:
-            </span>
-            <span style={{ color: "#16a34a" }}>Safety Limit: <strong>{settings.defaultLowStockLimit} units</strong></span>
-            <span style={{ color: "#16a34a" }}>Visibility Mode: <strong>{settings.visibilityMode}</strong></span>
-            <span style={{ color: "#16a34a" }}>Tagging: <strong>&apos;{settings.outOfStockTag}&apos;</strong></span>
+          Configure Rules →
+        </Link>
+      </div>
+
+      {/* Compact & User-Friendly Executive ROI Banner */}
+      <div
+        style={{
+          background: "linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%)",
+          borderRadius: "16px",
+          padding: "24px 28px",
+          marginBottom: "24px",
+          color: "#ffffff",
+          boxShadow: "0 12px 28px -6px rgba(15, 23, 42, 0.25)",
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        {/* Ambient Gradient Glow */}
+        <div
+          style={{
+            position: "absolute",
+            top: "-50px",
+            right: "-50px",
+            width: "220px",
+            height: "220px",
+            borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(99, 102, 241, 0.25) 0%, rgba(15, 23, 42, 0) 70%)",
+            pointerEvents: "none",
+          }}
+        />
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "20px", position: "relative", zIndex: 1 }}>
+          {/* Main Hero Stat */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
+              <span style={{ background: "rgba(99, 102, 241, 0.25)", border: "1px solid rgba(129, 140, 248, 0.4)", color: "#a5b4fc", fontSize: "11px", fontWeight: "700", padding: "3px 10px", borderRadius: "12px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                Live Financial ROI
+              </span>
+              <span style={{ fontSize: "12px", color: "#34d399", fontWeight: "600" }}>✓ Value Preserved</span>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "baseline", gap: "12px", marginTop: "4px" }}>
+              <h2 style={{ fontSize: "36px", fontWeight: "800", margin: 0, color: "#ffffff", letterSpacing: "-0.5px" }}>
+                ${(roi?.totalEstimatedRoi || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </h2>
+              <span style={{ fontSize: "13px", color: "#cbd5e1", fontWeight: "500" }}>
+                generated across {totalItems} catalog variants
+              </span>
+            </div>
           </div>
-          <button
-            onClick={() => setDismissChecklist(true)}
-            style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "13px" }}
-          >
-            ✕
-          </button>
+
+          {/* Sub-Pillar Micro Cards */}
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            <div style={{ background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.1)", borderRadius: "10px", padding: "10px 16px" }}>
+              <div style={{ fontSize: "11px", color: "#94a3b8", fontWeight: "600" }}>Recovered Demand</div>
+              <div style={{ fontSize: "16px", fontWeight: "700", color: "#818cf8", marginTop: "2px" }}>
+                ${(roi?.backInStockDemandValue || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.1)", borderRadius: "10px", padding: "10px 16px" }}>
+              <div style={{ fontSize: "11px", color: "#94a3b8", fontWeight: "600" }}>Catalog Protection</div>
+              <div style={{ fontSize: "16px", fontWeight: "700", color: "#34d399", marginTop: "2px" }}>
+                ${(roi?.catalogProtectionValue || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.1)", borderRadius: "10px", padding: "10px 16px" }}>
+              <div style={{ fontSize: "11px", color: "#94a3b8", fontWeight: "600" }}>Restock Buyers</div>
+              <div style={{ fontSize: "16px", fontWeight: "700", color: "#f43f5e", marginTop: "2px" }}>
+                {roi?.totalSubscribers || 0} notified
+              </div>
+            </div>
+          </div>
+
+          {/* Action Button */}
+          <div>
+            <Link
+              to="/app/roi"
+              style={{
+                background: "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
+                color: "#ffffff",
+                padding: "11px 22px",
+                borderRadius: "10px",
+                fontSize: "13px",
+                fontWeight: "700",
+                textDecoration: "none",
+                boxShadow: "0 4px 14px rgba(99, 102, 241, 0.4)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                whiteSpace: "nowrap",
+              }}
+            >
+              View Full ROI Analytics →
+            </Link>
+          </div>
         </div>
-      )}
+      </div>
 
       {/* KPI Cards Grid (4 Clean Balanced Cards) */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "16px", marginBottom: "24px" }}>

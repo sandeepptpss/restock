@@ -4471,6 +4471,104 @@ export async function getAutomationActionCount(shop) {
   }
 }
 
+/**
+ * Calculate financial ROI & business value metrics for the merchant
+ */
+export async function getRoiMetrics(shop, items = []) {
+  const defaultMetrics = {
+    totalEstimatedRoi: 0,
+    backInStockDemandValue: 0,
+    catalogProtectionValue: 0,
+    totalSubscribers: 0,
+    notifiedSubscribers: 0,
+    activeSubscribers: 0,
+    totalAutomations: 0,
+    restockCount: 0,
+    autoHideCount: 0,
+    averageProductPrice: 35.0,
+  };
+
+  if (!shop) return defaultMetrics;
+
+  try {
+    let avgPrice = 35.0;
+    if (items && items.length > 0) {
+      const validPrices = items
+        .map((i) => parseFloat(i.price))
+        .filter((p) => !isNaN(p) && p > 0);
+      if (validPrices.length > 0) {
+        avgPrice = validPrices.reduce((sum, p) => sum + p, 0) / validPrices.length;
+      }
+    }
+
+    let totalSubscribers = 0;
+    let notifiedSubscribers = 0;
+    let activeSubscribers = 0;
+    let totalAutomations = 0;
+    let restockCount = 0;
+    let autoHideCount = 0;
+
+    if (isDbConfigured()) {
+      await tryConnectDB();
+      const subscribers = await BackInStockSubscriber.find({ shop }).lean();
+      totalSubscribers = subscribers.length;
+      notifiedSubscribers = subscribers.filter((s) => s.status === "NOTIFIED").length;
+      activeSubscribers = subscribers.filter((s) => s.status === "SUBSCRIBED").length;
+
+      const logs = await AutomationLog.find({ shop, status: "SUCCESS" }).lean();
+      totalAutomations = logs.length;
+      restockCount = logs.filter(
+        (l) =>
+          l.eventType === "AUTO_PUBLISH" ||
+          l.eventType === "RESTOCK" ||
+          l.eventType === "RESTOCK_UNHIDE" ||
+          l.eventType === "AUTO_FILL"
+      ).length;
+      autoHideCount = logs.filter(
+        (l) => l.eventType === "AUTO_HIDE" || l.eventType === "AUTO_UNLIST"
+      ).length;
+    }
+
+    // Demand Value = Notified buyers * avgPrice * 0.35 (estimated conversion) + Pending buyers * avgPrice * 0.15
+    const backInStockDemandValue =
+      Math.round(
+        (notifiedSubscribers * avgPrice * 0.35 + activeSubscribers * avgPrice * 0.15) * 100
+      ) / 100;
+
+    // Protection Value = Restock actions * avgPrice * 0.40 + AutoHide actions * $8.50 (preventing bad buyer experience & bounce)
+    const catalogProtectionValue =
+      Math.round((restockCount * avgPrice * 0.40 + autoHideCount * 8.50) * 100) / 100;
+
+    // Base protection baseline if new install
+    const baseProtection = items && items.length > 0 ? Math.min(items.length * 15.0, 350.0) : 0;
+
+    const totalEstimatedRoi =
+      Math.round(
+        (backInStockDemandValue +
+          catalogProtectionValue +
+          (totalAutomations > 0 || totalSubscribers > 0 ? 0 : baseProtection)) *
+          100
+      ) / 100;
+
+    return {
+      totalEstimatedRoi,
+      backInStockDemandValue,
+      catalogProtectionValue,
+      totalSubscribers,
+      notifiedSubscribers,
+      activeSubscribers,
+      totalAutomations,
+      restockCount,
+      autoHideCount,
+      averageProductPrice: Math.round(avgPrice * 100) / 100,
+    };
+  } catch (err) {
+    console.warn("Error deriving ROI metrics:", err.message);
+    return defaultMetrics;
+  }
+}
+
+
 // Background scheduler ticker to process due restocks promptly (every 15s)
 if (typeof globalThis.__stockshield_restock_poller === "undefined") {
   globalThis.__stockshield_restock_poller = setInterval(async () => {

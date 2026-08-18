@@ -19,6 +19,7 @@ export default function App() {
         <s-link href="/app">Dashboard</s-link>
         <s-link href="/app/rules">Automation Rules</s-link>
         <s-link href="/app/inventory">Stock Radar</s-link>
+        <s-link href="/app/roi">ROI Analytics</s-link>
         <s-link href="/app/logs">Activity Logs</s-link>
         <s-link href="/app/settings">Settings</s-link>
         <s-link href="/app/plan">Plan</s-link>

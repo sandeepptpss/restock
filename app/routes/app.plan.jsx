@@ -500,6 +500,9 @@ export default function PlanPage() {
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Up to <strong>50 active products</strong></span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Live ROI &amp; Revenue Counter</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Basic out-of-stock tagging</span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
@@ -572,6 +575,9 @@ export default function PlanPage() {
                 <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Up to <strong>500 active products</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Live ROI &amp; Revenue Counter</strong></span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Auto-hiding out-of-stock items</span>
@@ -652,6 +658,9 @@ export default function PlanPage() {
                 <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "12px", lineHeight: "1.8", color: "#334155" }}>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span>Up to <strong>5,000 active items</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Live ROI &amp; Revenue Counter</strong></span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Everything in Growth</strong></span>
@@ -736,6 +745,9 @@ export default function PlanPage() {
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Unlimited active items</strong></span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                    <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Live ROI &amp; Revenue Counter</strong></span>
+                  </li>
+                  <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
                     <span style={{ color: "#10b981", fontWeight: "bold", lineHeight: "1.4" }}>✓</span> <span><strong>Everything in Pro</strong></span>
                   </li>
                   <li style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
@@ -803,6 +815,13 @@ export default function PlanPage() {
               <td style={{ textAlign: "center" }}>Up to 500</td>
               <td style={{ textAlign: "center" }}>Up to 5,000</td>
               <td style={{ textAlign: "center" }}><strong>Unlimited</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Live ROI &amp; Revenue Counter</strong></td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
+              <td style={{ textAlign: "center", color: "#16a34a", fontWeight: "600" }}>✓ Included</td>
             </tr>
             <tr>
               <td><strong>Out-of-Stock Auto Tagging</strong></td>

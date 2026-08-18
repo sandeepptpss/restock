@@ -17,7 +17,7 @@
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
     "db:reset": "node reset_db.mjs",
-    "verify": "node verify_pure_logic.mjs && node verify_trial_sms.mjs"
+    "verify": "node verify_pure_logic.mjs && node verify_trial_sms.mjs && node verify_roi_metrics.mjs"
   },
   "type": "module",
   "engines": {
