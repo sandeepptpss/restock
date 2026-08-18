@@ -4474,6 +4474,57 @@ export async function getAutomationActionCount(shop) {
 /**
  * Calculate financial ROI & business value metrics for the merchant
  */
+/**
+ * Which automation log entries the ROI model is allowed to price.
+ *
+ * These lists are matched against what the app actually writes to AutomationLog.
+ * They used to name event types that no code path emits (`AUTO_PUBLISH`,
+ * `RESTOCK_UNHIDE`, `AUTO_FILL`, `AUTO_UNLIST`), so every scheduled auto-restock
+ * earned exactly $0 of recovery credit and the ROI page reported "0 restocks"
+ * for shops whose timers had been firing all week.
+ */
+const ROI_RESTOCK_EVENT_TYPES = ["RESTOCK", "AUTO_FILL_RESTOCK", "SCHEDULED_UNHIDE"];
+const ROI_HIDE_EVENT_TYPES = ["AUTO_HIDE"];
+const ROI_ALERT_EVENT_TYPES = [
+  "EMAIL_ALERT",
+  "CUSTOMER_RESTOCK_ALERT",
+  "LOW_STOCK",
+  "STOCKOUT",
+  "VARIANT_STOCKOUT",
+];
+
+// A log row can describe work that has not happened yet, or work that was
+// deliberately not done. `SCHEDULED_UNHIDE` is written twice for one recovery —
+// once by the catalogue scan when the timer is booked, once by
+// executeScheduledRestock when it fires — and only the second one is a restock.
+// The executor prefixes every entry it writes with "[Scheduled Timer]", and its
+// no-op branches say "skipped", so those two markers separate a completed
+// action from an intention. The default is to count: an unrecognised phrasing
+// should read as work done, not silently drop off the ledger.
+function isCompletedRoiAction(log) {
+  const action = String(log?.actionTaken || "");
+  if (/skipped/i.test(action)) return false;
+  const isTimerType = log?.eventType === "SCHEDULED_UNHIDE" || log?.eventType === "AUTO_FILL_RESTOCK";
+  if (isTimerType && !action.startsWith("[Scheduled Timer]")) return false;
+  return true;
+}
+
+/**
+ * One recovery writes several log rows — the catalogue scan records the tag
+ * removal and the re-publish separately, both as `RESTOCK` — and pricing each
+ * row would bill the merchant's ROI twice for one event. Collapsing on
+ * event type + variant + minute keeps genuinely repeated recoveries (the same
+ * variant selling out again next week) while merging one action's paperwork.
+ */
+function countDistinctRoiActions(logs) {
+  const seen = new Set();
+  for (const log of logs) {
+    const minute = Math.floor(new Date(log.createdAt || 0).getTime() / 60000);
+    seen.add(`${log.eventType}|${log.productId || ""}|${log.variantId || ""}|${minute}`);
+  }
+  return seen.size;
+}
+
 export async function getRoiMetrics(shop, items = []) {
   const defaultMetrics = {
     totalEstimatedRoi: 0,
@@ -4485,6 +4536,7 @@ export async function getRoiMetrics(shop, items = []) {
     totalAutomations: 0,
     restockCount: 0,
     autoHideCount: 0,
+    alertCount: 0,
     averageProductPrice: 35.0,
   };
 
@@ -4501,33 +4553,57 @@ export async function getRoiMetrics(shop, items = []) {
       }
     }
 
-    let totalSubscribers = 0;
-    let notifiedSubscribers = 0;
-    let activeSubscribers = 0;
-    let totalAutomations = 0;
+    // Goes through the shared reader rather than querying BackInStockSubscriber
+    // directly: it normalises the shop domain and falls back to the in-memory
+    // store, so the ROI page and the Settings subscriber list can no longer
+    // disagree about how many buyers are waiting.
+    const subscribers = await getBackInStockSubscribers(shop);
+    const totalSubscribers = subscribers.length;
+    const notifiedSubscribers = subscribers.filter((s) => s.status === "NOTIFIED").length;
+    const activeSubscribers = subscribers.filter((s) => s.status === "SUBSCRIBED").length;
+
     let restockCount = 0;
     let autoHideCount = 0;
+    let alertCount = 0;
 
     if (isDbConfigured()) {
       await tryConnectDB();
-      const subscribers = await BackInStockSubscriber.find({ shop }).lean();
-      totalSubscribers = subscribers.length;
-      notifiedSubscribers = subscribers.filter((s) => s.status === "NOTIFIED").length;
-      activeSubscribers = subscribers.filter((s) => s.status === "SUBSCRIBED").length;
+      const logs = await AutomationLog.find({
+        shop,
+        // A PARTIAL restock still restored the product — only the follow-up
+        // warnings were incomplete — so it earns credit alongside SUCCESS.
+        status: { $in: ["SUCCESS", "PARTIAL"] },
+        eventType: {
+          $in: [...ROI_RESTOCK_EVENT_TYPES, ...ROI_HIDE_EVENT_TYPES, ...ROI_ALERT_EVENT_TYPES],
+        },
+      })
+        .select("eventType productId variantId actionTaken createdAt")
+        .lean();
 
-      const logs = await AutomationLog.find({ shop, status: "SUCCESS" }).lean();
-      totalAutomations = logs.length;
-      restockCount = logs.filter(
-        (l) =>
-          l.eventType === "AUTO_PUBLISH" ||
-          l.eventType === "RESTOCK" ||
-          l.eventType === "RESTOCK_UNHIDE" ||
-          l.eventType === "AUTO_FILL"
-      ).length;
-      autoHideCount = logs.filter(
-        (l) => l.eventType === "AUTO_HIDE" || l.eventType === "AUTO_UNLIST"
-      ).length;
+      const completed = logs.filter(isCompletedRoiAction);
+
+      restockCount = countDistinctRoiActions(
+        completed.filter((l) => ROI_RESTOCK_EVENT_TYPES.includes(l.eventType))
+      );
+
+      // Counted per product, not per log row. The catalogue scan re-records
+      // AUTO_HIDE for a product that is already hidden on every pass, and the
+      // bounce-rate protection is a property of the item being hidden — the
+      // fifth log entry for the same product has not prevented a fifth bounce.
+      autoHideCount = new Set(
+        completed
+          .filter((l) => ROI_HIDE_EVENT_TYPES.includes(l.eventType))
+          .map((l) => l.productId || "")
+      ).size;
+
+      alertCount = completed.filter((l) => ROI_ALERT_EVENT_TYPES.includes(l.eventType)).length;
     }
+
+    // Deliberately the sum of the three pillars rather than a count of every
+    // log row: billing syncs, plan activations, SMS settings checks, purchase
+    // orders and support requests are not automations, and counting them was
+    // why this card read "30 actions" under a breakdown that named 5.
+    const totalAutomations = restockCount + autoHideCount + alertCount;
 
     // Demand Value = Notified buyers * avgPrice * 0.35 (estimated conversion) + Pending buyers * avgPrice * 0.15
     const backInStockDemandValue =
@@ -4539,16 +4615,12 @@ export async function getRoiMetrics(shop, items = []) {
     const catalogProtectionValue =
       Math.round((restockCount * avgPrice * 0.40 + autoHideCount * 8.50) * 100) / 100;
 
-    // Base protection baseline if new install
-    const baseProtection = items && items.length > 0 ? Math.min(items.length * 15.0, 350.0) : 0;
-
+    // No synthetic floor. This used to add up to $350 of "preserved revenue" to
+    // any shop that had not triggered an automation yet, which the page then
+    // presented as a measured financial result — a number no inventory movement
+    // backed. A shop that has recovered nothing is shown $0.00.
     const totalEstimatedRoi =
-      Math.round(
-        (backInStockDemandValue +
-          catalogProtectionValue +
-          (totalAutomations > 0 || totalSubscribers > 0 ? 0 : baseProtection)) *
-          100
-      ) / 100;
+      Math.round((backInStockDemandValue + catalogProtectionValue) * 100) / 100;
 
     return {
       totalEstimatedRoi,
@@ -4560,6 +4632,7 @@ export async function getRoiMetrics(shop, items = []) {
       totalAutomations,
       restockCount,
       autoHideCount,
+      alertCount,
       averageProductPrice: Math.round(avgPrice * 100) / 100,
     };
   } catch (err) {

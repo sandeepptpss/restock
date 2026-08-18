@@ -739,7 +739,9 @@ export default function Dashboard() {
               <span style={{ background: "rgba(99, 102, 241, 0.25)", border: "1px solid rgba(129, 140, 248, 0.4)", color: "#a5b4fc", fontSize: "11px", fontWeight: "700", padding: "3px 10px", borderRadius: "12px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
                 Live Financial ROI
               </span>
-              <span style={{ fontSize: "12px", color: "#34d399", fontWeight: "600" }}>✓ Value Preserved</span>
+              {(roi?.totalEstimatedRoi || 0) > 0 && (
+                <span style={{ fontSize: "12px", color: "#34d399", fontWeight: "600" }}>✓ Value Preserved</span>
+              )}
             </div>
 
             <div style={{ display: "flex", alignItems: "baseline", gap: "12px", marginTop: "4px" }}>
@@ -771,7 +773,7 @@ export default function Dashboard() {
             <div style={{ background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.1)", borderRadius: "10px", padding: "10px 16px" }}>
               <div style={{ fontSize: "11px", color: "#94a3b8", fontWeight: "600" }}>Restock Buyers</div>
               <div style={{ fontSize: "16px", fontWeight: "700", color: "#f43f5e", marginTop: "2px" }}>
-                {roi?.totalSubscribers || 0} notified
+                {roi?.notifiedSubscribers || 0} notified
               </div>
             </div>
           </div>

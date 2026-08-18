@@ -35,7 +35,7 @@ export default function RoiPage() {
     : (roi.totalEstimatedRoi > 0 ? "∞" : "0.0");
 
   const handleCopySummary = () => {
-    const text = `StockShield Financial ROI Report for ${shop}:\nTotal Revenue Recovered: $${roi.totalEstimatedRoi.toFixed(2)}\nRecovered Demand: $${roi.backInStockDemandValue.toFixed(2)}\nCatalog Protection: $${roi.catalogProtectionValue.toFixed(2)}\nSubscribers Notified: ${roi.notifiedSubscribers}/${roi.totalSubscribers}\nAutomations Executed: ${roi.totalAutomations}`;
+    const text = `StockShield Financial ROI Report for ${shop}:\nTotal Revenue Recovered: $${roi.totalEstimatedRoi.toFixed(2)}\nRecovered Demand: $${roi.backInStockDemandValue.toFixed(2)}\nCatalog Protection: $${roi.catalogProtectionValue.toFixed(2)}\nSubscribers Notified: ${roi.notifiedSubscribers}/${roi.totalSubscribers}\nAutomations Executed: ${roi.totalAutomations} (${roi.restockCount} restocks, ${roi.autoHideCount} hides, ${roi.alertCount} alerts)`;
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 3000);
@@ -152,7 +152,7 @@ export default function RoiPage() {
             {roi?.totalAutomations || 0}
           </div>
           <div style={{ fontSize: "12px", color: "#92400e", marginTop: "4px" }}>
-            {roi?.restockCount || 0} restocks &amp; {roi?.autoHideCount || 0} hides
+            {roi?.restockCount || 0} restocks &middot; {roi?.autoHideCount || 0} hides &middot; {roi?.alertCount || 0} alerts
           </div>
         </div>
       </div>
@@ -172,7 +172,7 @@ export default function RoiPage() {
               1. Back-In-Stock Demand Recovery Model
             </h4>
             <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "12px", color: "#475569", lineHeight: "1.8" }}>
-              <li><strong>Average Store Price:</strong> ${roi?.averageProductPrice || 35.00} per item.</li>
+              <li><strong>Average Store Price:</strong> ${(roi?.averageProductPrice || 35.0).toFixed(2)} per item.</li>
               <li><strong>Notified Subscribers:</strong> 35% estimated e-commerce purchase conversion rate upon restock alert delivery.</li>
               <li><strong>Pending Pipeline Demand:</strong> 15% valuation for active waiting list subscribers.</li>
             </ul>
