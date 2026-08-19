@@ -405,28 +405,32 @@ export const action = async ({ request }) => {
     }
   }
 
-  const emailAlertsRaw = formData.get("enableEmailAlerts");
-  const stockoutRaw = formData.get("notifyOnStockout");
-  const restockRaw = formData.get("notifyOnRestock");
+  if (intent === "save_thresholds") {
+    const emailAlertsRaw = formData.get("enableEmailAlerts");
+    const stockoutRaw = formData.get("notifyOnStockout");
+    const restockRaw = formData.get("notifyOnRestock");
 
-  const updated = await updateInventorySettings(session.shop, {
-    defaultLowStockLimit: formData.get("defaultLowStockLimit"),
-    outOfStockTag: formData.get("outOfStockTag"),
-    leadTimeDays: formData.get("leadTimeDays"),
-    targetStockDays: formData.get("targetStockDays"),
-    ...(features.emailAlerts && formData.has("enableEmailAlerts") ? {
-      enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
-      alertEmail: formData.get("alertEmail"),
-      notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
-      notifyOnRestock: restockRaw !== null ? (restockRaw === "on" || restockRaw === "true") : undefined,
-    } : {}),
-  });
+    const updated = await updateInventorySettings(session.shop, {
+      defaultLowStockLimit: formData.get("defaultLowStockLimit"),
+      outOfStockTag: formData.get("outOfStockTag"),
+      leadTimeDays: formData.get("leadTimeDays"),
+      targetStockDays: formData.get("targetStockDays"),
+      ...(features.emailAlerts && formData.has("enableEmailAlerts") ? {
+        enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
+        alertEmail: formData.get("alertEmail"),
+        notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
+        notifyOnRestock: restockRaw !== null ? (restockRaw === "on" || restockRaw === "true") : undefined,
+      } : {}),
+    });
 
-  // The low stock threshold and out-of-stock tag saved here are part of what the
-  // theme app embed reads, so the storefront's copy has to follow the save.
-  await syncStorefrontConfig(admin, session.shop);
+    // The low stock threshold and out-of-stock tag saved here are part of what the
+    // theme app embed reads, so the storefront's copy has to follow the save.
+    await syncStorefrontConfig(admin, session.shop);
 
-  return { success: true, settings: updated, type: "save_thresholds", message: "Threshold settings saved" };
+    return { success: true, settings: updated, type: "save_thresholds", message: "Threshold settings saved" };
+  }
+
+  return { success: false, message: "Unknown action intent" };
 };
 
 
@@ -963,7 +967,7 @@ export default function Settings() {
                   <input id="field-leadTimeDays"
                     type="number"
                     name="leadTimeDays"
-                    defaultValue={settings.leadTimeDays || 7}
+                    defaultValue={settings.leadTimeDays || 14}
                     className="form-input"
                     min="1"
                   />
