@@ -631,6 +631,21 @@ export default function Settings() {
         setSuccessBanner(fetcher.data.message);
       }
     }
+    if (fetcher.data?.type === "create_po" && fetcher.data?.success) {
+      const poNum = fetcher.data.po?.poNumber || "";
+      const msg = `Purchase Order ${poNum} generated successfully!`;
+      shopify?.toast?.show?.(msg);
+      setSuccessBanner(msg);
+      setPoSupplierName("");
+      setPoSupplierEmail("");
+      setPoItemTitle("");
+      setPoTargetQty("50");
+    }
+    if (fetcher.data?.type === "update_po" && fetcher.data?.success) {
+      const msg = "Purchase Order status updated successfully!";
+      shopify?.toast?.show?.(msg);
+      setSuccessBanner(msg);
+    }
     if (fetcher.data?.type === "ticket_reply_failed") {
       shopify?.toast?.show?.(fetcher.data.message, { isError: true });
     }
@@ -1275,7 +1290,13 @@ export default function Settings() {
                       <td style={{ fontWeight: "700", color: "#4f46e5" }}>{po.poNumber}</td>
                       <td style={{ fontWeight: "600" }}>{po.supplierName}</td>
                       <td>{po.supplierEmail || "N/A"}</td>
-                      <td>{po.totalItems || po.items?.length || 1} Item(s)</td>
+                      <td>
+                        {(() => {
+                          const lineCount = po.totalItems || po.items?.length || 1;
+                          const totalQty = po.items?.reduce((sum, i) => sum + (Number(i.reorderQty) || Number(i.targetQty) || 0), 0) || 0;
+                          return totalQty > 0 ? `${lineCount} Item(s) (${totalQty} Qty)` : `${lineCount} Item(s)`;
+                        })()}
+                      </td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         {po.status === "DRAFT" && (
                           <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
