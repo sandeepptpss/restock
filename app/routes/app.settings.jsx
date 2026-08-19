@@ -263,6 +263,60 @@ export const action = async ({ request }) => {
     return { success: true, type: "ticket_reply", updatedTicket: updated, supportTickets };
   }
 
+  if (intent === "close_ticket") {
+    const ticketId = formData.get("ticketId");
+    const isAdmin = isSupportAdminShop(session.shop);
+    const updated = await updateSupportTicketStatus(ticketId, {
+      status: "RESOLVED",
+      shop: isAdmin ? null : session.shop,
+    });
+
+    if (!updated) {
+      return {
+        success: false,
+        type: "ticket_close_failed",
+        message: `Could not close ticket ${ticketId}.`,
+      };
+    }
+
+    const supportTickets = await getSupportTickets(isAdmin ? "ALL" : session.shop, 50);
+
+    return {
+      success: true,
+      type: "ticket_closed",
+      updatedTicket: updated,
+      supportTickets,
+      message: `Support query ${ticketId} has been marked as Closed / Resolved.`,
+    };
+  }
+
+  if (intent === "reopen_ticket") {
+    const ticketId = formData.get("ticketId");
+    const isAdmin = isSupportAdminShop(session.shop);
+    const updated = await updateSupportTicketStatus(ticketId, {
+      status: "OPEN",
+      shop: isAdmin ? null : session.shop,
+    });
+
+    if (!updated) {
+      return {
+        success: false,
+        type: "ticket_reopen_failed",
+        message: `Could not reopen ticket ${ticketId}.`,
+      };
+    }
+
+    const supportTickets = await getSupportTickets(isAdmin ? "ALL" : session.shop, 50);
+
+    return {
+      success: true,
+      type: "ticket_reopened",
+      updatedTicket: updated,
+      supportTickets,
+      message: `Support query ${ticketId} has been reopened.`,
+    };
+  }
+
   // Plan changes are handled by /app/plan, which is the only route that talks to
   // Shopify Billing. Leaving a second copy here meant two places could grant a
   // tier, and this one did it without verifying the charge.
@@ -611,6 +665,14 @@ export default function Settings() {
       setSuccessBanner("Solution saved & ticket updated successfully!");
       setActiveTicket(null);
       setReplyText("");
+    }
+    if (fetcher.data?.type === "ticket_closed" && fetcher.data?.success) {
+      shopify?.toast?.show?.(fetcher.data.message || "Query closed successfully!");
+      setSuccessBanner(fetcher.data.message || "Support query closed successfully!");
+    }
+    if (fetcher.data?.type === "ticket_reopened" && fetcher.data?.success) {
+      shopify?.toast?.show?.(fetcher.data.message || "Query reopened successfully!");
+      setSuccessBanner(fetcher.data.message || "Support query reopened successfully!");
     }
     if (fetcher.data?.type === "dispatch_alert") {
       if (fetcher.data?.success) {
@@ -2154,12 +2216,21 @@ export default function Settings() {
                 <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)" }}>
                   {isSupportAdmin
                     ? "Every ticket submitted across all merchant stores. Answer here and the merchant is emailed automatically."
-                    : "The tickets you have submitted, and our replies. We will also email you when we answer."}
+                    : "The tickets you have submitted, and our replies. Closed tickets can be reopened anytime."}
                 </p>
               </div>
-              <span style={{ background: "#e0e7ff", color: "#3730a3", padding: "4px 12px", borderRadius: "20px", fontSize: "12px", fontWeight: "700" }}>
-                Total Tickets: {tickets.length}
-              </span>
+
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ background: "#e0e7ff", color: "#3730a3", padding: "4px 12px", borderRadius: "20px", fontSize: "12px", fontWeight: "700" }}>
+                  Total: {tickets.length}
+                </span>
+                <span style={{ background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", padding: "4px 10px", borderRadius: "20px", fontSize: "12px", fontWeight: "600" }}>
+                  Open: {tickets.filter((t) => t.status !== "RESOLVED").length}
+                </span>
+                <span style={{ background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", padding: "4px 10px", borderRadius: "20px", fontSize: "12px", fontWeight: "600" }}>
+                  Resolved: {tickets.filter((t) => t.status === "RESOLVED").length}
+                </span>
+              </div>
             </div>
 
             <table className="stock-table">
@@ -2171,13 +2242,13 @@ export default function Settings() {
                   <th>Topic</th>
                   <th>Query Message</th>
                   <th>Status</th>
-                  {isSupportAdmin && <th>Solution / Action</th>}
+                  <th>{isSupportAdmin ? "Solution / Action" : "Action"}</th>
                 </tr>
               </thead>
               <tbody>
                 {tickets.length === 0 ? (
                   <tr>
-                    <td colSpan={isSupportAdmin ? 7 : 5} style={{ textAlign: "center", padding: "30px", color: "var(--text-muted)", fontSize: "13px" }}>
+                    <td colSpan={isSupportAdmin ? 7 : 6} style={{ textAlign: "center", padding: "30px", color: "var(--text-muted)", fontSize: "13px" }}>
                       {isSupportAdmin
                         ? "No tickets have been submitted by any store yet."
                         : "You have not submitted any support tickets yet. Use the form above to send us your first query."}
@@ -2204,45 +2275,121 @@ export default function Settings() {
                         <td>
                           <span style={{ fontWeight: "600", fontSize: "12px" }}>{t.topic}</span>
                         </td>
-                        <td style={{ maxWidth: "260px", fontSize: "12px", color: "#334155" }}>
+                        <td style={{ maxWidth: "280px", fontSize: "12px", color: "#334155" }}>
                           <div>{t.message}</div>
                           {t.adminReply && (
-                            <div style={{ marginTop: "6px", background: "#f0fdf4", border: "1px solid #bbf7d0", padding: "6px", borderRadius: "6px", fontSize: "11px", color: "#166534" }}>
-                              <strong>Solution:</strong> {t.adminReply}
+                            <div style={{ marginTop: "8px", background: "#f0fdf4", border: "1px solid #bbf7d0", padding: "8px 12px", borderRadius: "8px", fontSize: "12px", color: "#166534" }}>
+                              <div style={{ fontWeight: "700", display: "flex", alignItems: "center", gap: "4px", marginBottom: "3px" }}>
+                                <span>💬 Support Solution:</span>
+                              </div>
+                              {t.adminReply}
                             </div>
                           )}
                         </td>
                         <td>
-                          {t.status === "OPEN" && <span className="badge badge-critical">Open Query</span>}
-                          {t.status === "IN_PROGRESS" && <span className="badge badge-warning">In Progress</span>}
-                          {t.status === "RESOLVED" && <span className="badge badge-healthy">Resolved</span>}
+                          {t.status === "OPEN" && (
+                            <span style={{ background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", padding: "4px 10px", borderRadius: "12px", fontSize: "11.5px", fontWeight: "600", display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                              ● Open Query
+                            </span>
+                          )}
+                          {t.status === "IN_PROGRESS" && (
+                            <span style={{ background: "#fffbe6", color: "#b45309", border: "1px solid #fde68a", padding: "4px 10px", borderRadius: "12px", fontSize: "11.5px", fontWeight: "600", display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                              ⏳ In Progress
+                            </span>
+                          )}
+                          {t.status === "RESOLVED" && (
+                            <span style={{ background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", padding: "4px 10px", borderRadius: "12px", fontSize: "11.5px", fontWeight: "600", display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                              ✓ Resolved
+                            </span>
+                          )}
                         </td>
-                        {isSupportAdmin && (
-                          <td>
-                            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                              <button
-                                className="btn-primary"
-                                style={{ padding: "4px 8px", fontSize: "12px" }}
-                                onClick={() => {
-                                  setActiveTicket(t);
-                                  setReplyText(t.adminReply || "");
-                                  setReplyStatus(t.status || "RESOLVED");
-                                }}
-                              >
-                                {t.adminReply ? "Edit Solution" : "Provide Solution"}
-                              </button>
-                              <a
-                                href={replyMailto}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="btn-secondary"
-                                style={{ padding: "4px 8px", fontSize: "12px", textDecoration: "none" }}
-                              >
-                                Reply Email
-                              </a>
-                            </div>
-                          </td>
-                        )}
+                        <td>
+                          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" }}>
+                            {isSupportAdmin && (
+                              <>
+                                <button
+                                  className="btn-primary"
+                                  style={{ padding: "4px 8px", fontSize: "12px" }}
+                                  onClick={() => {
+                                    setActiveTicket(t);
+                                    setReplyText(t.adminReply || "");
+                                    setReplyStatus(t.status || "RESOLVED");
+                                  }}
+                                >
+                                  {t.adminReply ? "Edit Solution" : "Provide Solution"}
+                                </button>
+                                <a
+                                  href={replyMailto}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="btn-secondary"
+                                  style={{ padding: "4px 8px", fontSize: "12px", textDecoration: "none" }}
+                                >
+                                  Reply Email
+                                </a>
+                              </>
+                            )}
+
+                            {t.status !== "RESOLVED" ? (
+                              <fetcher.Form method="post" style={{ display: "inline" }}>
+                                <input type="hidden" name="intent" value="close_ticket" />
+                                <input type="hidden" name="ticketId" value={t.ticketId} />
+                                <button
+                                  type="submit"
+                                  disabled={fetcher.state === "submitting"}
+                                  onClick={(e) => {
+                                    if (!window.confirm("Are you sure you want to mark this query as closed/resolved?")) {
+                                      e.preventDefault();
+                                    }
+                                  }}
+                                  className="btn-secondary"
+                                  style={{
+                                    padding: "5px 12px",
+                                    fontSize: "12px",
+                                    color: "#dc2626",
+                                    borderColor: "#fca5a5",
+                                    background: "#fef2f2",
+                                    borderRadius: "6px",
+                                    cursor: "pointer",
+                                    fontWeight: "600",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: "4px",
+                                  }}
+                                >
+                                  ✓ Close Query
+                                </button>
+                              </fetcher.Form>
+                            ) : (
+                              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                <span style={{ fontSize: "12px", color: "#16a34a", fontWeight: "600", display: "inline-flex", alignItems: "center", gap: "3px" }}>
+                                  ✓ Closed
+                                </span>
+                                <fetcher.Form method="post" style={{ display: "inline" }}>
+                                  <input type="hidden" name="intent" value="reopen_ticket" />
+                                  <input type="hidden" name="ticketId" value={t.ticketId} />
+                                  <button
+                                    type="submit"
+                                    disabled={fetcher.state === "submitting"}
+                                    className="btn-secondary"
+                                    style={{
+                                      padding: "3px 8px",
+                                      fontSize: "11px",
+                                      color: "#4f46e5",
+                                      borderColor: "#c7d2fe",
+                                      background: "#eef2ff",
+                                      borderRadius: "6px",
+                                      cursor: "pointer",
+                                      fontWeight: "500",
+                                    }}
+                                  >
+                                    Reopen
+                                  </button>
+                                </fetcher.Form>
+                              </div>
+                            )}
+                          </div>
+                        </td>
                       </tr>
                     );
                   })
