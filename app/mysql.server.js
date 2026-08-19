@@ -354,7 +354,15 @@ async function syncModel(pool, model) {
     if (have.has(path.name)) continue;
     const type = sqlTypeFor(path, indexed.has(path.name));
     console.log(`[mysql] ${table}: adding column ${path.name} ${type}`);
-    await pool.query(`ALTER TABLE ${quoteId(table)} ADD COLUMN ${quoteId(path.name)} ${type} NULL`);
+    try {
+      await pool.query(`ALTER TABLE ${quoteId(table)} ADD COLUMN ${quoteId(path.name)} ${type} NULL`);
+    } catch (err) {
+      // Another instance (or another boot-time connect racing this one) added it
+      // first. The column exists either way, which is all this step is for —
+      // failing here would reject the connection and take the request down.
+      if (err?.errno !== 1060 && err?.code !== "ER_DUP_FIELDNAME") throw err;
+      console.log(`[mysql] ${table}: column ${path.name} was already added concurrently`);
+    }
   }
 
   const [indexRows] = await pool.query(`SHOW INDEX FROM ${quoteId(table)}`);
@@ -377,6 +385,10 @@ async function syncModel(pool, model) {
 async function syncPendingModels() {
   const pending = [...state.registry.values()].filter((m) => !state.synced.has(m.table));
   for (const model of pending) {
+    // Re-checked rather than trusted from the snapshot above: this loop awaits
+    // between tables, so a second caller that started before the first table was
+    // marked would otherwise re-run the DDL for every table after it.
+    if (state.synced.has(model.table)) continue;
     // Marked before awaiting so two concurrent requests do not both run the DDL.
     state.synced.add(model.table);
     try {

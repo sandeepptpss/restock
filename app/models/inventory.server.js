@@ -45,6 +45,22 @@ const MIN_VELOCITY_OBSERVATION_DAYS = 3;
 // wide enough to swallow a genuine second stockout for the rest of the morning.
 const SCAN_ALERT_DEDUPE_MS = Number(process.env.SCAN_ALERT_DEDUPE_MS) || 10 * 60 * 1000;
 
+// How many times an auto-fill is tried before the job is given up on. A failure
+// used to be terminal, which left the product hidden until something happened to
+// queue a brand new job — a single throttled or timed-out mutation was enough.
+const MAX_RESTOCK_ATTEMPTS = Number(process.env.MAX_RESTOCK_ATTEMPTS) || 3;
+
+// Delay before the first retry; doubled for each attempt after that.
+const RESTOCK_RETRY_BASE_MS = Number(process.env.RESTOCK_RETRY_BASE_MS) || 5 * 60 * 1000;
+
+// A restock that failed for a structural reason — missing access scopes, a variant
+// stocked at no location — fails again the moment it is retried. After the attempt
+// limit is spent, no new job is queued for that variant for this long, so a
+// catalogue scan running every time the dashboard loads stops re-queuing a job that
+// cannot succeed and burying the audit trail under identical FAILED rows.
+const RESTOCK_FAILURE_COOLDOWN_MS =
+  Number(process.env.RESTOCK_FAILURE_COOLDOWN_MS) || 30 * 60 * 1000;
+
 /**
  * Run a GraphQL request, backing off and retrying when Shopify throttles us.
  * Large catalogues exhaust the cost bucket, and an unhandled THROTTLED error
@@ -771,6 +787,9 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
                   sku
                   price
                   inventoryQuantity
+                  # A CONTINUE policy or tracking switched off makes the variant
+                  # purchasable whatever inventoryQuantity says.
+                  inventoryPolicy
                   inventoryItem {
                     id
                     tracked
@@ -869,11 +888,14 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
       const threshold = customT ? customT.minThreshold : settings.defaultLowStockLimit;
 
       const qty = v.inventoryQuantity ?? 0;
+      // Tracking off, or "continue selling when out of stock": Shopify reports 0
+      // but the variant can still be bought, so it is neither critical nor a
+      // candidate for hiding or refilling.
+      const alwaysSellable = isAlwaysSellableVariant(v);
       let status = "HEALTHY";
-      if (qty <= 0) {
-        status = "CRITICAL";
-      } else if (qty <= threshold) {
-        status = "WARNING";
+      if (!alwaysSellable) {
+        if (qty <= 0) status = "CRITICAL";
+        else if (qty <= threshold) status = "WARNING";
       }
 
       // Sales velocity observed from this shop's recorded inventory drawdowns.
@@ -906,6 +928,7 @@ export async function fetchShopifyInventory(admin, shop, { maxProducts = MAX_SCA
         price: v.price,
         inventoryQuantity: qty,
         inventoryItemId: v.inventoryItem?.id || null,
+        alwaysSellable,
         threshold,
         status,
         isOutOfStockTagged,
@@ -1335,15 +1358,24 @@ export async function runStockoutAutomationScan(admin, shop) {
         `[Scan] ${firstItem.productTitle} has more than 100 variants; only the first 100 were evaluated, skipping any hide action`
       );
     }
+    // KEEP_VISIBLE is not just "never triggers a hide": it is a promise that the
+    // app leaves storefront visibility alone, which the tag-enforcement pass in
+    // step 3 would otherwise break for any product still tagged from an earlier
+    // strategy.
+    const neverHide = settings.variantStrategy === "KEEP_VISIBLE";
+
     const isProductStockout =
       !variantsTruncated &&
       evaluateStockoutCondition(
-        productItems.map((i) => i.inventoryQuantity),
+        productItems.map((i) => ({ quantity: i.inventoryQuantity, alwaysSellable: i.alwaysSellable })),
         settings.variantStrategy
       );
 
-    const emptyVariants = productItems.filter((i) => i.inventoryQuantity <= 0);
-    const stockedVariants = productItems.filter((i) => i.inventoryQuantity > 0);
+    // An always-sellable variant is never empty for automation purposes: it must
+    // not be auto-filled (writing a quantity onto it switches tracking on) and it
+    // counts towards the product still being buyable.
+    const emptyVariants = productItems.filter((i) => !i.alwaysSellable && i.inventoryQuantity <= 0);
+    const stockedVariants = productItems.filter((i) => i.alwaysSellable || i.inventoryQuantity > 0);
     const variantSummary = `${stockedVariants.length}/${productItems.length} variants in stock`;
 
     // 0. MERCHANT NOTIFICATIONS — driven by what actually changed since the app
@@ -1437,7 +1469,11 @@ export async function runStockoutAutomationScan(admin, shop) {
             productId,
             variantId: item.variantId,
             inventoryItemId: item.inventoryItemId,
-            locationId: primaryLocationId,
+            // No location is passed on purpose. Unlike the webhook, which is told
+            // which location changed, the scan only knows the shop's primary one —
+            // and refilling there is wrong for a variant stocked somewhere else.
+            // scheduleProductRestock looks up the item's own stocking location and
+            // falls back to the primary itself.
             productTitle: item.productTitle,
             variantTitle: item.variantTitle,
             sku: item.sku,
@@ -1705,7 +1741,94 @@ export async function runStockoutAutomationScan(admin, shop) {
     //
     // Skipped for a stockout (already handled above) and for a tag this pass just
     // removed, whose `productTags` snapshot is now stale.
-    if (!isProductStockout && !outOfStockTagRemoved && settings.enableAutoHide !== false) {
+    //
+    // Under "Never hide the product" the enforcement is inverted — see the block
+    // below — because this one would otherwise hide every product still carrying a
+    // tag from whichever strategy was configured before.
+    if (neverHide) {
+      // "Never hide the product" has to mean it, including for products this app
+      // hid under a stricter strategy the merchant has since moved away from.
+      // Those keep the out-of-stock tag and the hidden status, and — because every
+      // variant is empty — the restock branch above never runs for them, so
+      // nothing else in the scan would ever bring them back.
+      //
+      // Skipped when that branch did handle the product: its snapshot of the tags
+      // and status is now stale and acting on it would repeat the work.
+      const handledByRestockBranch = stockedVariants.length > 0 && !variantsTruncated;
+      const carriesOutOfStockTag = (firstItem.productTags || []).includes(settings.outOfStockTag);
+      // UNPUBLISH_CHANNEL leaves no trace on the product, so needsVisibilityRestore
+      // answers "maybe" (true) for every product under that mode. On a real restock
+      // that is fine — an idempotent republish beats a lookup. Here there is no
+      // restock to justify it, and taking it at face value would republish the whole
+      // catalogue on every scan, including products the merchant unpublished
+      // themselves. The app's own out-of-stock tag is the only evidence it did the
+      // unpublishing, so under that mode it is required.
+      const hiddenByApp =
+        settings.visibilityMode === "UNPUBLISH_CHANNEL"
+          ? carriesOutOfStockTag
+          : needsVisibilityRestore(
+              { status: firstItem.productStatus, seoHidden: firstItem.productSeoHidden, tags: firstItem.productTags },
+              settings.visibilityMode,
+              settings
+            );
+
+      if (!handledByRestockBranch && !outOfStockTagRemoved && (carriesOutOfStockTag || hiddenByApp)) {
+        const actions = [];
+        const recoveryErrors = [];
+
+        if (settings.enableAutoTag !== false && carriesOutOfStockTag) {
+          try {
+            const removeRes = await admin.graphql(
+              `#graphql
+                mutation tagsRemove($id: ID!, $tags: [String!]!) {
+                  tagsRemove(id: $id, tags: $tags) { userErrors { message } }
+                }
+              `,
+              { variables: { id: productId, tags: [settings.outOfStockTag] } }
+            );
+            const removeErrs = collectGraphqlErrors(await removeRes.json(), "tagsRemove");
+            if (removeErrs.length > 0) recoveryErrors.push(...removeErrs);
+            else {
+              outOfStockTagRemoved = true;
+              actions.push(`removed tag '${settings.outOfStockTag}'`);
+            }
+          } catch (err) {
+            recoveryErrors.push(`tagsRemove: ${err.message}`);
+          }
+        }
+
+        // needsVisibilityRestore is what keeps this off a product the merchant
+        // drafted, archived or unlisted by hand: it restores only what the app's
+        // own out-of-stock tag proves the app hid.
+        if (settings.enableAutoPublish !== false && hiddenByApp) {
+          const restored = await restoreProductVisibility(admin, {
+            productId,
+            visibilityMode: settings.visibilityMode,
+            shop,
+            productStatus: firstItem.productStatus,
+            productTags: firstItem.productTags,
+          });
+          if (restored.errors.length > 0) recoveryErrors.push(...restored.errors);
+          else if (restored.changed) publishedCount++;
+          actions.push(restored.action);
+        }
+
+        if (actions.length > 0 || recoveryErrors.length > 0) {
+          logsToCreate.push({
+            shop,
+            eventType: "RESTOCK",
+            productId,
+            productTitle: firstItem.productTitle,
+            variantTitle: variantSummary,
+            sku: firstItem.sku,
+            quantity: totalProdInventory,
+            actionTaken: `${actions.join(" & ") || "Un-hide attempted"} — the ${settings.variantStrategy} strategy never hides a product (${variantSummary})`,
+            status: recoveryErrors.length > 0 ? "FAILED" : "SUCCESS",
+            details: recoveryErrors.length > 0 ? recoveryErrors.join(" | ") : null,
+          });
+        }
+      }
+    } else if (!isProductStockout && !outOfStockTagRemoved && settings.enableAutoHide !== false) {
       const carriesOutOfStockTag = (firstItem.productTags || []).includes(settings.outOfStockTag);
 
       // UNPUBLISH_CHANNEL is the one mode whose result cannot be read off the
@@ -2253,14 +2376,47 @@ export async function getPrimaryLocationId(admin) {
 }
 
 /**
+ * Whether a variant can be bought no matter what its inventory says.
+ *
+ * Shopify reports `inventoryQuantity: 0` for a variant with inventory tracking
+ * switched off, and a variant whose policy is CONTINUE keeps selling past zero.
+ * Both are permanently purchasable, so treating their 0 as "out of stock" hid
+ * products that were never unavailable — and then auto-filled a quantity onto
+ * them, which silently switches tracking on.
+ */
+export function isAlwaysSellableVariant(variant) {
+  if (!variant || typeof variant !== "object") return false;
+  const tracked = variant.tracked ?? variant.inventoryItem?.tracked;
+  if (tracked === false) return true;
+  return String(variant.inventoryPolicy || "").toUpperCase() === "CONTINUE";
+}
+
+/**
+ * One entry of the quantity list a stockout condition is evaluated over.
+ *
+ * Accepts a plain number (what every caller passed before) or
+ * `{ quantity, alwaysSellable }`. An always-sellable variant counts as stocked
+ * however deep its recorded quantity goes, which is what keeps it out of every
+ * "is this variant empty" test below without having to special-case each one.
+ */
+function toSellableQuantity(entry) {
+  if (entry && typeof entry === "object") {
+    if (entry.alwaysSellable) return Number.POSITIVE_INFINITY;
+    return Number(entry.quantity) || 0;
+  }
+  return Number(entry) || 0;
+}
+
+/**
  * Decide whether a product counts as "stocked out" under the configured
  * Variant Stockout Condition. Shared by the webhook and the catalog scan so both
  * paths honour every strategy identically.
  *
- * `quantities` is the available quantity of every sellable variant of the product.
+ * `quantities` is the available quantity of every sellable variant of the product,
+ * as numbers or as `{ quantity, alwaysSellable }` entries.
  */
 export function evaluateStockoutCondition(quantities, strategy) {
-  const qtys = (Array.isArray(quantities) ? quantities : []).map((q) => Number(q) || 0);
+  const qtys = (Array.isArray(quantities) ? quantities : []).map(toSellableQuantity);
   if (qtys.length === 0) return false;
 
   const availableVariantCount = qtys.filter((q) => q > 0).length;
@@ -2534,7 +2690,7 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
     try {
       const pubId = await getOnlineStorePublicationId(admin, shop);
       if (pubId) {
-        await admin.graphql(
+        const pubRes = await admin.graphql(
           `#graphql
             mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
               publishablePublish(id: $id, input: $input) { userErrors { message } }
@@ -2542,6 +2698,9 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
           `,
           { variables: { id, input: [{ publicationId: pubId }] } }
         );
+        // Collected rather than discarded: a publish that was refused otherwise
+        // reports as a completed restore.
+        errors.push(...collectGraphqlErrors(await pubRes.json(), "publishablePublish"));
       }
       const res = await admin.graphql(
         `#graphql
@@ -2568,7 +2727,8 @@ export async function applyStockoutVisibility(admin, { productId, visibilityMode
       return {
         mode,
         action: "Tag only — product kept ACTIVE and visible on storefront",
-        changed: errs.length === 0,
+        // `errors`, not `errs`: it also carries a refused publish from above.
+        changed: errors.length === 0,
         errors,
       };
     } catch (err) {
@@ -2694,7 +2854,7 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
     try {
       const pubId = await getOnlineStorePublicationId(admin, shop);
       if (pubId) {
-        await admin.graphql(
+        const pubRes = await admin.graphql(
           `#graphql
             mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
               publishablePublish(id: $id, input: $input) { userErrors { message } }
@@ -2702,6 +2862,9 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
           `,
           { variables: { id, input: [{ publicationId: pubId }] } }
         );
+        // Collected rather than discarded: a publish that was refused otherwise
+        // reports as a completed restore.
+        errors.push(...collectGraphqlErrors(await pubRes.json(), "publishablePublish"));
       }
       const res = await admin.graphql(
         `#graphql
@@ -2728,7 +2891,8 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
       return {
         mode,
         action: "Tag only — restored product status to ACTIVE & visible on storefront",
-        changed: errs.length === 0,
+        // `errors`, not `errs`: it also carries a refused publish from above.
+        changed: errors.length === 0,
         errors,
       };
     } catch (err) {
@@ -2798,7 +2962,11 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
       const errs = collectGraphqlErrors(json, "metafieldsSet");
       if (errs.length > 0) errors.push(...errs);
 
-      await admin.graphql(
+      // Checked, not fired and forgotten. This is the mutation that actually
+      // un-hides the product in the recommended mode; ignoring its result reported
+      // a restore that never happened and left the product UNLISTED while the
+      // audit trail said otherwise.
+      const activateRes = await admin.graphql(
         `#graphql
           mutation restoreProductActive($input: ProductInput!) {
             productUpdate(input: $input) {
@@ -2809,6 +2977,8 @@ export async function restoreProductVisibility(admin, { productId, visibilityMod
         `,
         { variables: { input: { id, status: "ACTIVE" } } }
       );
+      const activateErrs = collectGraphqlErrors(await activateRes.json(), "productUpdate");
+      if (activateErrs.length > 0) errors.push(...activateErrs);
 
       return {
         mode,
@@ -2871,7 +3041,8 @@ export async function fetchProductStockState(admin, productId) {
                   title
                   sku
                   inventoryQuantity
-                  inventoryItem { id }
+                  inventoryPolicy
+                  inventoryItem { id tracked }
                 }
               }
             }
@@ -2890,6 +3061,7 @@ export async function fetchProductStockState(admin, productId) {
       sku: e.node.sku || "",
       inventoryItemId: e.node.inventoryItem?.id || null,
       quantity: e.node.inventoryQuantity ?? 0,
+      alwaysSellable: isAlwaysSellableVariant(e.node),
     }));
 
     return {
@@ -2904,6 +3076,36 @@ export async function fetchProductStockState(admin, productId) {
     };
   } catch (err) {
     console.warn(`[fetchProductStockState] Could not read ${id}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * The most recent auto-fill failure for this variant inside the cooldown window,
+ * or null. Read from the audit log rather than from the job table so both kinds of
+ * failure count: a job that spent its retries, and one that was never queued
+ * because no location could be resolved.
+ */
+async function findRecentRestockFailure(shop, { productId, variantId }) {
+  if (!isDbConfigured() || !shop) return null;
+  try {
+    return plain(
+      await AutomationLog.findOne({
+        shop,
+        eventType: "AUTO_FILL_RESTOCK",
+        status: "FAILED",
+        // Auto-fill is a per-variant recovery, so a sibling variant's failure must
+        // not hold this one down. Jobs written before variantId was recorded fall
+        // back to the product.
+        ...(variantId ? { variantId } : { productId }),
+        createdAt: { $gte: new Date(Date.now() - RESTOCK_FAILURE_COOLDOWN_MS) },
+      })
+        .sort({ createdAt: -1 })
+        .lean()
+    );
+  } catch (err) {
+    // A cooldown lookup that fails must not stop a restock being scheduled.
+    console.warn(`[ScheduledRestock] Could not read recent failures for ${shop}:`, err.message);
     return null;
   }
 }
@@ -2937,13 +3139,23 @@ export async function scheduleProductRestock(
 
   // Resolve the location the item is actually stocked at before falling back to
   // the primary location — a blank locationId makes the auto-fill mutation fail.
-  let finalLocationId = ensureGid(locationId, "Location");
-  if (!finalLocationId && admin) {
-    finalLocationId = await getInventoryItemLocationId(admin, finalInventoryItemId);
-  }
-  if (!finalLocationId && admin) {
-    finalLocationId = await getPrimaryLocationId(admin);
-  }
+  //
+  // Resolved lazily and once: the branches below that find an unchanged pending
+  // job need no location at all, and paying two GraphQL calls per empty variant
+  // on every catalogue scan to reach that conclusion is pure waste.
+  let cachedLocationId;
+  const resolveLocationId = async () => {
+    if (cachedLocationId !== undefined) return cachedLocationId;
+    let resolved = ensureGid(locationId, "Location");
+    if (!resolved && admin) {
+      resolved = await getInventoryItemLocationId(admin, finalInventoryItemId);
+    }
+    if (!resolved && admin) {
+      resolved = await getPrimaryLocationId(admin);
+    }
+    cachedLocationId = resolved || "";
+    return cachedLocationId;
+  };
 
   // Prevent duplicate pending restock jobs.
   //
@@ -2977,9 +3189,13 @@ export async function scheduleProductRestock(
     }
 
     if (scheduledAt < existingJob.scheduledAt) {
+      // Only overwrite the stored location with one we could actually resolve:
+      // blanking a working location because this caller's lookup came back empty
+      // is how a runnable job turned into one that fails on execution.
+      const rescheduledLocationId = (await resolveLocationId()) || existingJob.locationId || null;
       await ScheduledRestock.updateOne(
         { _id: existingJob.id },
-        { $set: { scheduledAt, targetQuantity, locationId: finalLocationId, status: "PENDING" } }
+        { $set: { scheduledAt, targetQuantity, locationId: rescheduledLocationId, status: "PENDING" } }
       );
       console.log(`[ScheduledRestock] Rescheduled pending job ${existingJob.id} for ${jobScope} to new earlier schedule: ${scheduledAt.toISOString()} (delay: ${delayMs}ms)`);
 
@@ -2998,6 +3214,51 @@ export async function scheduleProductRestock(
 
     console.log(`[ScheduledRestock] Job ${existingJob.id} is already PENDING for ${jobScope} (scheduled for ${existingJob.scheduledAt.toISOString()})`);
     return { ...existingJob, created: false };
+  }
+
+  // Nothing is pending, so this would be a fresh job. Hold off if an identical one
+  // has just exhausted its retries: the cause is almost always structural, and the
+  // catalogue scan runs often enough to re-queue it several times an hour.
+  //
+  // Auto-fills only. An unhide is the merchant's own restock coming back into the
+  // storefront, and holding that down because a refill failed would leave a product
+  // that is genuinely in stock hidden.
+  const recentFailure =
+    jobType === "AUTO_FILL"
+      ? await findRecentRestockFailure(shop, { productId: finalProductId, variantId: finalVariantId })
+      : null;
+  if (recentFailure) {
+    console.log(
+      `[ScheduledRestock] Not re-queuing ${jobScope}: an auto-fill failed at ${new Date(recentFailure.createdAt).toISOString()} and is in its cooldown — ${recentFailure.details || "see the activity log"}`
+    );
+    return { created: false, cooledDown: true, error: recentFailure.details || null };
+  }
+
+  const finalLocationId = await resolveLocationId();
+
+  // An auto-fill with nowhere to write is not worth queuing: it would sit through
+  // the restock delay only to fail, and the merchant would see a bare "FAILED" two
+  // minutes later with no idea why. Say so now, once, naming the likely cause.
+  if (targetQuantity > 0 && !finalLocationId) {
+    const error = `Could not resolve a stocking location for ${finalInventoryItemId}. The app is most likely missing the read_locations / read_inventory / write_inventory access scopes — check the granted scopes in Shopify admin, then reinstall or re-approve the app. A variant that is stocked at no location at all produces the same result.`;
+
+    await createAutomationLog({
+      shop,
+      eventType: "AUTO_FILL_RESTOCK",
+      productId: finalProductId,
+      productTitle,
+      variantId: finalVariantId,
+      variantTitle,
+      inventoryItemId: finalInventoryItemId,
+      sku,
+      quantity: targetQuantity,
+      actionTaken: `Auto-restock of variant '${variantTitle || "default"}' could not be scheduled — no stocking location could be resolved, product left hidden`,
+      status: "FAILED",
+      details: error,
+    });
+
+    console.error(`[ScheduledRestock] Not scheduling ${jobScope}: ${error}`);
+    return { created: false, failed: true, error };
   }
 
   const record = plain(
@@ -3124,7 +3385,27 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
   // the job must be reported as FAILED instead of untagging and republishing an
   // out-of-stock product.
   if (autoFillError) {
-    await ScheduledRestock.updateOne({ _id: restockId }, { $set: { status: "FAILED" } });
+    // A throttled or timed-out mutation used to end the job for good, leaving the
+    // product hidden until something else happened to queue a new one. The job is
+    // handed back to the queue with a backed-off schedule until the attempt limit
+    // is spent, and only then reported as failed.
+    const attempts = Number(record.attempts || 0) + 1;
+    const willRetry = attempts < MAX_RESTOCK_ATTEMPTS;
+    const retryDelayMs = RESTOCK_RETRY_BASE_MS * 2 ** (attempts - 1);
+    const retryAt = new Date(Date.now() + retryDelayMs);
+    const variantLabel = variantTitle || "default";
+
+    await ScheduledRestock.updateOne(
+      { _id: restockId },
+      {
+        $set: {
+          status: willRetry ? "PENDING" : "FAILED",
+          attempts,
+          lastError: autoFillError,
+          ...(willRetry ? { scheduledAt: retryAt } : {}),
+        },
+      }
+    );
 
     await createAutomationLog({
       shop,
@@ -3136,13 +3417,26 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
       inventoryItemId,
       sku,
       quantity: record.targetQuantity,
-      actionTaken: `[Scheduled Timer] Auto-fill of variant '${variantTitle || "default"}' to ${record.targetQuantity} units FAILED — product left hidden`,
-      status: "FAILED",
+      actionTaken: willRetry
+        ? `[Scheduled Timer] Auto-fill of variant '${variantLabel}' to ${record.targetQuantity} units failed (attempt ${attempts} of ${MAX_RESTOCK_ATTEMPTS}) — product left hidden, retrying at ${retryAt.toISOString()}`
+        : `[Scheduled Timer] Auto-fill of variant '${variantLabel}' to ${record.targetQuantity} units FAILED after ${attempts} attempts — product left hidden`,
+      // A retry still pending is not a final outcome, so it is not reported as one.
+      status: willRetry ? "PARTIAL" : "FAILED",
       details: autoFillError,
     });
 
-    console.error(`[ScheduledRestock] Job ${restockId} failed: ${autoFillError}`);
-    return null;
+    console.error(
+      `[ScheduledRestock] Job ${restockId} attempt ${attempts}/${MAX_RESTOCK_ATTEMPTS} failed: ${autoFillError}` +
+        (willRetry ? ` — retrying at ${retryAt.toISOString()}` : " — giving up")
+    );
+
+    // No timer is set for the retry on purpose. The job is PENDING again with a
+    // future scheduledAt, which the background poller at the foot of this module
+    // and /cron/scheduled-restocks both already pick up — and unlike a timer, both
+    // survive the restart that would otherwise strand the retry.
+
+    // Not counted as a hard failure by the cron summary while a retry is still due.
+    return willRetry ? { skipped: true, reason: "retry-scheduled", productId, attempts } : null;
   }
 
   const isUnhideJob = record.jobType === "UNHIDE";
@@ -3194,7 +3488,11 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
         didAutoFill &&
         ((variantId && String(v.id) === String(variantId)) ||
           (inventoryItemId && String(v.inventoryItemId) === String(inventoryItemId)));
-      return isFilledVariant ? record.targetQuantity : v.quantity;
+      return {
+        quantity: isFilledVariant ? record.targetQuantity : v.quantity,
+        // A variant that sells past zero is never what keeps the product hidden.
+        alwaysSellable: Boolean(v.alwaysSellable),
+      };
     });
 
     const stillStockedOut =
@@ -3202,7 +3500,7 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
 
     if (stillStockedOut) {
       const emptyVariants = (stockState.variants || [])
-        .filter((_variant, i) => liveQuantities[i] <= 0)
+        .filter((_variant, i) => !liveQuantities[i].alwaysSellable && liveQuantities[i].quantity <= 0)
         .map((v) => v.title || v.id)
         .join(", ");
 
@@ -3227,7 +3525,7 @@ export async function executeScheduledRestock(admin, restockId, context = {}) {
           ? `[Scheduled Timer] Auto-filled variant '${variantTitle || "default"}' to ${record.targetQuantity} units — product kept hidden, it still meets the ${settings.variantStrategy} stockout condition`
           : `[Scheduled Timer] Auto-unhide skipped — product still meets the ${settings.variantStrategy} stockout condition`,
         status: "SUCCESS",
-        details: `Variant quantities: ${liveQuantities.join(", ")}${emptyVariants ? ` | still empty: ${emptyVariants}` : ""}`,
+        details: `Variant quantities: ${liveQuantities.map((q) => (q.alwaysSellable ? `${q.quantity} (always sellable)` : q.quantity)).join(", ")}${emptyVariants ? ` | still empty: ${emptyVariants}` : ""}`,
       });
 
       console.log(`[ScheduledRestock] Job ${restockId}: ${productId} still meets the stockout condition (${liveQuantities.join(", ")})`);

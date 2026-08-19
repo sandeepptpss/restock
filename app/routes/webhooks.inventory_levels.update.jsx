@@ -9,6 +9,7 @@ import {
   cancelPendingRestocks,
   processPendingScheduledRestocks,
   evaluateStockoutCondition,
+  isAlwaysSellableVariant,
   needsVisibilityRestore,
   calculateDelayMs,
   classifyInventoryTransition,
@@ -132,6 +133,9 @@ export const action = async ({ request }) => {
               title
               sku
               inventoryQuantity
+              # A CONTINUE policy or tracking switched off makes the variant
+              # purchasable whatever inventoryQuantity says.
+              inventoryPolicy
               product {
                 id
                 title
@@ -152,7 +156,8 @@ export const action = async ({ request }) => {
                       title
                       sku
                       inventoryQuantity
-                      inventoryItem { id }
+                      inventoryPolicy
+                      inventoryItem { id tracked }
                     }
                   }
                 }
@@ -226,11 +231,23 @@ export const action = async ({ request }) => {
       sku: v.sku || "",
       inventoryItemId: v.inventoryItem?.id || null,
       quantity: isChangedVariant(v) ? changedVariantQuantity : (v.inventoryQuantity ?? 0),
+      // Tracking off or a CONTINUE policy: Shopify reports 0 while the variant
+      // stays purchasable, so it must not count towards hiding the product.
+      alwaysSellable: isAlwaysSellableVariant(v),
     }));
 
-    const variantQuantities = variantStates.map((v) => v.quantity);
-    const inStockVariants = variantQuantities.filter((q) => q > 0).length;
-    const variantSummary = `${inStockVariants}/${variantQuantities.length} variants in stock`;
+    // The changed variant's own flag comes from the product's variant list, which
+    // carries `tracked`; the top-level `variant` selection does not.
+    const changedVariantAlwaysSellable =
+      variantStates.find((v) => String(v.variantId) === String(variant.id))?.alwaysSellable ??
+      isAlwaysSellableVariant(variant);
+
+    const variantQuantities = variantStates.map((v) => ({
+      quantity: v.quantity,
+      alwaysSellable: v.alwaysSellable,
+    }));
+    const inStockVariants = variantStates.filter((v) => v.alwaysSellable || v.quantity > 0).length;
+    const variantSummary = `${inStockVariants}/${variantStates.length} variants in stock`;
 
     // Every automation decision below is about whether the *variant* is sellable,
     // which is its total across locations — not the single location this webhook
@@ -270,13 +287,19 @@ export const action = async ({ request }) => {
       `[Webhook] ${product.title} / ${variant.title}: ${describeTransition(variantTransition)} — ${variantSummary}, product ${product.status}`
     );
 
+    // A variant that keeps selling past zero — tracking off, or a CONTINUE
+    // inventory policy — never actually runs out, so its quantity reaching 0 is
+    // not a stockout and must not alert, hide or schedule a refill.
+    const variantStockedOut =
+      variantTransition.type === INVENTORY_TRANSITION.STOCKOUT && !changedVariantAlwaysSellable;
+
     // 4. PER-VARIANT STOCKOUT ACTIONS
     //
     // These belong to the variant that emptied and run whether or not the product
     // as a whole qualifies for hiding. Auto-fill in particular is a per-variant
     // recovery: scoping it to the product-level stockout left every empty variant
     // of a still-buyable product sitting at 0 with nothing scheduled to refill it.
-    if (variantTransition.type === INVENTORY_TRANSITION.STOCKOUT) {
+    if (variantStockedOut) {
       if (settings.enableEmailAlerts !== false && settings.notifyOnStockout !== false) {
         sendMerchantInventoryEmail(shop, {
           eventType: "STOCKOUT",
@@ -349,7 +372,7 @@ export const action = async ({ request }) => {
     // 4a. This variant emptied but the product stays listed, because the configured
     // Variant Stockout Condition is not met — for the default strategy that means
     // at least one sibling variant is still buyable.
-    if (variantTransition.type === INVENTORY_TRANSITION.STOCKOUT && !isStockoutCondition) {
+    if (variantStockedOut && !isStockoutCondition) {
       logsToCreate.push({
         shop,
         eventType: "VARIANT_STOCKOUT",
@@ -365,7 +388,7 @@ export const action = async ({ request }) => {
       });
     }
     // 4b. PRODUCT-LEVEL STOCKOUT RULE EVALUATION
-    else if (variantTransition.type === INVENTORY_TRANSITION.STOCKOUT) {
+    else if (variantStockedOut) {
       const tagToApply = settings.outOfStockTag || "out-of-stock";
 
       // The product emptied again before an earlier restock's unhide delay ran out,

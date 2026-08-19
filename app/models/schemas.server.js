@@ -240,6 +240,11 @@ const scheduledRestockSchema = new Schema(
     targetQuantity: { type: Number, default: 10 },
     scheduledAt: { type: Date, required: true },
     status: { type: String, default: "PENDING" },
+    // How many times execution has been tried. A failed auto-fill stays PENDING
+    // with a backed-off scheduledAt until this reaches the attempt limit, so a
+    // transient API error no longer leaves the product hidden for good.
+    attempts: { type: Number, default: 0 },
+    lastError: { type: String, default: "" },
     // AUTO_FILL: scheduled at stockout, refills the variant to autoFillQuantity.
     // UNHIDE: scheduled when the merchant restocks, applies the configured delay
     // before removing the out-of-stock tag and reversing the visibility mode.

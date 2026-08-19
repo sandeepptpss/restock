@@ -84,7 +84,10 @@ export default function AutomationLogs() {
       // Variant title is searchable so a multi-variant product's trail can be
       // narrowed to the one variant the merchant is investigating.
       (log.variantTitle && log.variantTitle.toLowerCase().includes(term)) ||
-      (log.sku && log.sku.toLowerCase().includes(term));
+      (log.sku && log.sku.toLowerCase().includes(term)) ||
+      // The failure reason is the most useful thing to search for when something
+      // went wrong, so it is matched as well as displayed.
+      (log.details && log.details.toLowerCase().includes(term));
 
     if (!matchesSearch) return false;
     if (filterType !== "ALL" && log.eventType !== filterType) return false;
@@ -235,7 +238,30 @@ export default function AutomationLogs() {
                   <td>
                     <strong>{log.quantity}</strong> units
                   </td>
-                  <td style={{ fontSize: "13px" }}>{log.actionTaken}</td>
+                  <td style={{ fontSize: "13px" }}>
+                    {log.actionTaken}
+                    {/* Every failure already carries the reason it failed. Without
+                        it on screen the trail said only "FAILED", and the cause —
+                        a missing access scope, a rejected mutation — could only be
+                        read out of the database. */}
+                    {log.details && (
+                      <div
+                        style={{
+                          marginTop: "6px",
+                          padding: "6px 10px",
+                          borderRadius: "6px",
+                          borderLeft: `3px solid ${log.status === "SUCCESS" ? "#cbd5e1" : "#f59e0b"}`,
+                          background: log.status === "SUCCESS" ? "#f8fafc" : "#fffbeb",
+                          color: log.status === "SUCCESS" ? "var(--text-muted)" : "#92400e",
+                          fontSize: "12px",
+                          lineHeight: "1.5",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {log.details}
+                      </div>
+                    )}
+                  </td>
                   <td>
                     <span className={`badge ${log.status === "SUCCESS" ? "badge-healthy" : "badge-warning"}`}>
                       {log.status}

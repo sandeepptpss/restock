@@ -9,6 +9,8 @@ function extractFunc(name) {
 }
 
 const evalCode = `
+${extractFunc('isAlwaysSellableVariant')}
+${extractFunc('toSellableQuantity')}
 ${extractFunc('evaluateStockoutCondition')}
 ${extractFunc('readVisibilityState')}
 ${extractFunc('isSeoHiddenValue')}
@@ -17,6 +19,7 @@ ${extractFunc('isHiddenForMode')}
 ${extractFunc('calculateDelayMs')}
 
 return {
+  isAlwaysSellableVariant,
   evaluateStockoutCondition,
   needsVisibilityRestore,
   isHiddenForMode,
@@ -25,6 +28,7 @@ return {
 `;
 
 const {
+  isAlwaysSellableVariant,
   evaluateStockoutCondition,
   needsVisibilityRestore,
   isHiddenForMode,
@@ -115,6 +119,63 @@ assert(
 assert(
   evaluateStockoutCondition([0], "KEEP_VISIBLE") === false,
   "KEEP_VISIBLE: Never trigger stockout hide for single-variant [0]"
+);
+
+// Condition 5: variants that stay purchasable at 0 — inventory tracking off, or a
+// CONTINUE policy. Shopify reports inventoryQuantity 0 for both, and counting that
+// as out of stock hid products that were never unavailable.
+assert(
+  isAlwaysSellableVariant({ inventoryItem: { tracked: false } }) === true,
+  "ALWAYS SELLABLE: Untracked variant is recognised (inventoryItem.tracked = false)"
+);
+assert(
+  isAlwaysSellableVariant({ tracked: false }) === true,
+  "ALWAYS SELLABLE: Flattened `tracked` shape is recognised"
+);
+assert(
+  isAlwaysSellableVariant({ inventoryPolicy: "CONTINUE" }) === true,
+  "ALWAYS SELLABLE: CONTINUE inventory policy is recognised"
+);
+assert(
+  isAlwaysSellableVariant({ inventoryPolicy: "DENY", inventoryItem: { tracked: true } }) === false,
+  "ALWAYS SELLABLE: A normal tracked DENY variant is not always sellable"
+);
+assert(
+  evaluateStockoutCondition([{ quantity: 0, alwaysSellable: true }], "HIDE_ALL_OOS") === false,
+  "HIDE_ALL_OOS: Untracked single-variant product is NOT hidden at quantity 0"
+);
+assert(
+  evaluateStockoutCondition(
+    [{ quantity: 0, alwaysSellable: false }, { quantity: 0, alwaysSellable: true }],
+    "HIDE_ALL_OOS"
+  ) === false,
+  "HIDE_ALL_OOS: One always-sellable variant keeps the product listed"
+);
+assert(
+  evaluateStockoutCondition(
+    [{ quantity: 5, alwaysSellable: false }, { quantity: 0, alwaysSellable: true }],
+    "HIDE_ANY_OOS"
+  ) === false,
+  "HIDE_ANY_OOS: An always-sellable variant at 0 does not count as out of stock"
+);
+assert(
+  evaluateStockoutCondition(
+    [{ quantity: 0, alwaysSellable: false }, { quantity: 0, alwaysSellable: false }],
+    "HIDE_ANY_OOS"
+  ) === true,
+  "HIDE_ANY_OOS: Genuinely empty tracked variants still trigger"
+);
+assert(
+  evaluateStockoutCondition(
+    [{ quantity: 5 }, { quantity: 0 }, { quantity: 0, alwaysSellable: true }],
+    "HIDE_THRESHOLD"
+  ) === false,
+  "HIDE_THRESHOLD: An always-sellable variant counts towards the 2 available"
+);
+assert(
+  evaluateStockoutCondition([0, 0, 0], "HIDE_ALL_OOS") === true &&
+    evaluateStockoutCondition([5, 0, 0], "HIDE_ALL_OOS") === false,
+  "BACKWARDS COMPATIBLE: Plain number quantities behave exactly as before"
 );
 
 // -------------------------------------------------------------
