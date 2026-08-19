@@ -196,9 +196,7 @@ export async function updateInventorySettings(shop, data) {
   const existing = (await InventorySettings.findOne({ shop }).lean()) || DEFAULT_SETTINGS(shop);
 
   const mergedData = {
-    defaultLowStockLimit: data.defaultLowStockLimit != null && !isNaN(Number(data.defaultLowStockLimit))
-      ? Math.max(0, Number(data.defaultLowStockLimit))
-      : existing.defaultLowStockLimit,
+    defaultLowStockLimit: data.defaultLowStockLimit != null ? (Number(data.defaultLowStockLimit) || 5) : existing.defaultLowStockLimit,
     visibilityMode: data.visibilityMode || existing.visibilityMode || "UNLISTED",
     variantStrategy: data.variantStrategy || existing.variantStrategy || "HIDE_ALL_OOS",
     locationStrategy: data.locationStrategy || existing.locationStrategy || "ALL_LOCATIONS",
@@ -208,7 +206,7 @@ export async function updateInventorySettings(shop, data) {
     autoFillQuantity: data.autoFillQuantity != null ? (Number(data.autoFillQuantity) || 10) : existing.autoFillQuantity,
     enableAutoHide: data.enableAutoHide != null ? Boolean(data.enableAutoHide) : existing.enableAutoHide,
     enableAutoTag: data.enableAutoTag != null ? Boolean(data.enableAutoTag) : existing.enableAutoTag,
-    outOfStockTag: data.outOfStockTag != null ? (String(data.outOfStockTag).trim() || "out-of-stock") : (existing.outOfStockTag || "out-of-stock"),
+    outOfStockTag: data.outOfStockTag || existing.outOfStockTag || "out-of-stock",
     lowStockTag: data.lowStockTag || existing.lowStockTag || "low-stock",
     enableLowStockBadge: data.enableLowStockBadge != null ? Boolean(data.enableLowStockBadge) : (existing.enableLowStockBadge ?? true),
     lowStockBadgeText: data.lowStockBadgeText != null ? data.lowStockBadgeText : (existing.lowStockBadgeText || "🔥 Only a few items left in stock!"),
@@ -220,12 +218,8 @@ export async function updateInventorySettings(shop, data) {
     alertEmail: data.alertEmail != null ? data.alertEmail : (existing.alertEmail || ""),
     notifyOnStockout: data.notifyOnStockout != null ? Boolean(data.notifyOnStockout) : (existing.notifyOnStockout ?? true),
     notifyOnRestock: data.notifyOnRestock != null ? Boolean(data.notifyOnRestock) : (existing.notifyOnRestock ?? true),
-    leadTimeDays: data.leadTimeDays != null && !isNaN(Number(data.leadTimeDays)) && Number(data.leadTimeDays) > 0
-      ? Number(data.leadTimeDays)
-      : existing.leadTimeDays,
-    targetStockDays: data.targetStockDays != null && !isNaN(Number(data.targetStockDays)) && Number(data.targetStockDays) > 0
-      ? Number(data.targetStockDays)
-      : existing.targetStockDays,
+    leadTimeDays: data.leadTimeDays != null ? (Number(data.leadTimeDays) || 14) : existing.leadTimeDays,
+    targetStockDays: data.targetStockDays != null ? (Number(data.targetStockDays) || 30) : existing.targetStockDays,
     reviewPromptDismissed: data.reviewPromptDismissed != null ? Boolean(data.reviewPromptDismissed) : (existing.reviewPromptDismissed ?? false),
     enableSmsAlerts: data.enableSmsAlerts != null ? Boolean(data.enableSmsAlerts) : (existing.enableSmsAlerts ?? false),
     smsProvider: normalizeSmsProvider(data.smsProvider || existing.smsProvider),
@@ -3752,16 +3746,6 @@ export async function syncSubscriptionFromShopify(admin, shop) {
 
   const shopifyPlan = shopifySub.plan;
   const stored = await getShopSubscription(shop);
-
-  const isDevMode =
-    process.env.NODE_ENV !== "production" ||
-    process.env.SHOPIFY_BILLING_DEV_BYPASS === "true";
-
-  if (isDevMode && stored?.plan && stored.plan !== "FREE" && shopifyPlan === "FREE") {
-    // In dev / custom app mode, Shopify has no billing subscription contract active.
-    // Preserve the stored dev plan so features stay unlocked during local testing.
-    return { synced: true, changed: false, subscription: stored };
-  }
 
   // The trial window Shopify reports for the subscription the shop is on now. A
   // paid plan with no trial (Enterprise, or a shop that had already used theirs)

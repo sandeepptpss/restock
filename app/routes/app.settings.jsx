@@ -405,32 +405,28 @@ export const action = async ({ request }) => {
     }
   }
 
-  if (intent === "save_thresholds") {
-    const emailAlertsRaw = formData.get("enableEmailAlerts");
-    const stockoutRaw = formData.get("notifyOnStockout");
-    const restockRaw = formData.get("notifyOnRestock");
+  const emailAlertsRaw = formData.get("enableEmailAlerts");
+  const stockoutRaw = formData.get("notifyOnStockout");
+  const restockRaw = formData.get("notifyOnRestock");
 
-    const updated = await updateInventorySettings(session.shop, {
-      defaultLowStockLimit: formData.get("defaultLowStockLimit"),
-      outOfStockTag: formData.get("outOfStockTag"),
-      leadTimeDays: formData.get("leadTimeDays"),
-      targetStockDays: formData.get("targetStockDays"),
-      ...(features.emailAlerts && formData.has("enableEmailAlerts") ? {
-        enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
-        alertEmail: formData.get("alertEmail"),
-        notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
-        notifyOnRestock: restockRaw !== null ? (restockRaw === "on" || restockRaw === "true") : undefined,
-      } : {}),
-    });
+  const updated = await updateInventorySettings(session.shop, {
+    defaultLowStockLimit: formData.get("defaultLowStockLimit"),
+    outOfStockTag: formData.get("outOfStockTag"),
+    leadTimeDays: formData.get("leadTimeDays"),
+    targetStockDays: formData.get("targetStockDays"),
+    ...(features.emailAlerts && formData.has("enableEmailAlerts") ? {
+      enableEmailAlerts: emailAlertsRaw !== null ? (emailAlertsRaw === "on" || emailAlertsRaw === "true") : undefined,
+      alertEmail: formData.get("alertEmail"),
+      notifyOnStockout: stockoutRaw !== null ? (stockoutRaw === "on" || stockoutRaw === "true") : undefined,
+      notifyOnRestock: restockRaw !== null ? (restockRaw === "on" || restockRaw === "true") : undefined,
+    } : {}),
+  });
 
-    // The low stock threshold and out-of-stock tag saved here are part of what the
-    // theme app embed reads, so the storefront's copy has to follow the save.
-    await syncStorefrontConfig(admin, session.shop);
+  // The low stock threshold and out-of-stock tag saved here are part of what the
+  // theme app embed reads, so the storefront's copy has to follow the save.
+  await syncStorefrontConfig(admin, session.shop);
 
-    return { success: true, settings: updated, type: "save_thresholds", message: "Threshold settings saved" };
-  }
-
-  return { success: false, message: "Unknown action intent" };
+  return { success: true, settings: updated, type: "save_thresholds", message: "Threshold settings saved" };
 };
 
 
@@ -631,21 +627,6 @@ export default function Settings() {
         setSuccessBanner(fetcher.data.message);
       }
     }
-    if (fetcher.data?.type === "create_po" && fetcher.data?.success) {
-      const poNum = fetcher.data.po?.poNumber || "";
-      const msg = `Purchase Order ${poNum} generated successfully!`;
-      shopify?.toast?.show?.(msg);
-      setSuccessBanner(msg);
-      setPoSupplierName("");
-      setPoSupplierEmail("");
-      setPoItemTitle("");
-      setPoTargetQty("50");
-    }
-    if (fetcher.data?.type === "update_po" && fetcher.data?.success) {
-      const msg = "Purchase Order status updated successfully!";
-      shopify?.toast?.show?.(msg);
-      setSuccessBanner(msg);
-    }
     if (fetcher.data?.type === "ticket_reply_failed") {
       shopify?.toast?.show?.(fetcher.data.message, { isError: true });
     }
@@ -792,11 +773,28 @@ export default function Settings() {
       )}
 
       {/* Navigation Tabs */}
-      <div className="settings-nav-tabs">
+      <div
+        style={{
+          display: "flex",
+          gap: "8px",
+          borderBottom: "1px solid var(--border-color)",
+          marginBottom: "24px",
+          flexWrap: "wrap",
+        }}
+      >
         <button
           type="button"
           onClick={() => setActiveTab("general")}
-          className={`settings-tab-btn ${activeTab === "general" ? "active" : ""}`}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "general" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "general" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "general" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+          }}
         >
           General Preferences &amp; Rules
         </button>
@@ -804,11 +802,23 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("po")}
-          className={`settings-tab-btn ${activeTab === "po" ? "active" : ""}`}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "po" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "po" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "po" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
         >
           Purchase Orders (POs)
           {poGate.allowed && posList.length > 0 && (
-            <span className="tab-badge">
+            <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {posList.length}
             </span>
           )}
@@ -817,11 +827,23 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("subscribers")}
-          className={`settings-tab-btn ${activeTab === "subscribers" ? "active" : ""}`}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "subscribers" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "subscribers" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "subscribers" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
         >
           Customer Restock Alerts
           {restockGate.allowed && subscribersList.length > 0 && (
-            <span className="tab-badge">
+            <span style={{ background: "#fef3c7", color: "#92400e", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {subscribersList.length}
             </span>
           )}
@@ -830,11 +852,32 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("sms")}
-          className={`settings-tab-btn ${activeTab === "sms" ? "active" : ""}`}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "sms" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "sms" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "sms" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
         >
           SMS &amp; Klaviyo
           {smsGate.allowed && smsSettings?.enableSmsAlerts && (
-            <span className="tab-badge">
+            <span
+              style={{
+                background: smsConfig.ready ? "#dcfce7" : "#fef3c7",
+                color: smsConfig.ready ? "#166534" : "#92400e",
+                padding: "2px 8px",
+                borderRadius: "12px",
+                fontSize: "11px",
+                fontWeight: "700",
+              }}
+            >
               {smsConfig.ready ? "LIVE" : "SETUP"}
             </span>
           )}
@@ -843,11 +886,23 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("support")}
-          className={`settings-tab-btn ${activeTab === "support" ? "active" : ""}`}
+          style={{
+            padding: "10px 18px",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "support" ? "3px solid #4f46e5" : "3px solid transparent",
+            color: activeTab === "support" ? "#4f46e5" : "var(--text-muted)",
+            fontWeight: activeTab === "support" ? "700" : "500",
+            fontSize: "14px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
         >
           Support &amp; Help Desk
           {tickets.length > 0 && (
-            <span className="tab-badge">
+            <span style={{ background: "#e0e7ff", color: "#3730a3", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
               {tickets.length}
             </span>
           )}
@@ -982,7 +1037,7 @@ export default function Settings() {
                   <input id="field-leadTimeDays"
                     type="number"
                     name="leadTimeDays"
-                    defaultValue={settings.leadTimeDays || 14}
+                    defaultValue={settings.leadTimeDays || 7}
                     className="form-input"
                     min="1"
                   />
@@ -1290,13 +1345,7 @@ export default function Settings() {
                       <td style={{ fontWeight: "700", color: "#4f46e5" }}>{po.poNumber}</td>
                       <td style={{ fontWeight: "600" }}>{po.supplierName}</td>
                       <td>{po.supplierEmail || "N/A"}</td>
-                      <td>
-                        {(() => {
-                          const lineCount = po.totalItems || po.items?.length || 1;
-                          const totalQty = po.items?.reduce((sum, i) => sum + (Number(i.reorderQty) || Number(i.targetQty) || 0), 0) || 0;
-                          return totalQty > 0 ? `${lineCount} Item(s) (${totalQty} Qty)` : `${lineCount} Item(s)`;
-                        })()}
-                      </td>
+                      <td>{po.totalItems || po.items?.length || 1} Item(s)</td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         {po.status === "DRAFT" && (
                           <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>

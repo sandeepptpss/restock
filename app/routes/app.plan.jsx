@@ -229,22 +229,9 @@ export const action = async ({ request }) => {
       console.error("[billing] could not write BILLING_FAILED log:", logErr.message);
     }
 
-    const isDevOrUnpublished =
-      process.env.NODE_ENV !== "production" ||
-      process.env.SHOPIFY_BILLING_DEV_BYPASS === "true" ||
-      (billingError && billingError.toLowerCase().includes("public distribution"));
-
-    if (isDevOrUnpublished) {
-      console.warn(`[billing] Development / Custom distribution detected — granting ${plan} to ${session.shop} in test mode.`);
+    if (process.env.NODE_ENV !== "production" && process.env.SHOPIFY_BILLING_DEV_BYPASS === "true") {
+      console.warn(`[billing] SHOPIFY_BILLING_DEV_BYPASS active — granting ${plan} to ${session.shop} with no charge.`);
       const updatedSub = await updateShopSubscription(session.shop, plan);
-      await createAutomationLog({
-        shop: session.shop,
-        eventType: "BILLING_DEV_ACTIVATED",
-        productTitle: `Development Plan Activated: ${plan}`,
-        variantTitle: "Dev Bypass",
-        actionTaken: `Granted ${plan} plan in development/test mode (Shopify Billing bypass).`,
-        status: "SUCCESS",
-      }).catch(() => {});
       return { success: true, subscription: updatedSub, plan, devBypass: true };
     }
 
