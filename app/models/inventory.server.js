@@ -3747,6 +3747,16 @@ export async function syncSubscriptionFromShopify(admin, shop) {
   const shopifyPlan = shopifySub.plan;
   const stored = await getShopSubscription(shop);
 
+  const isDevMode =
+    process.env.NODE_ENV !== "production" ||
+    process.env.SHOPIFY_BILLING_DEV_BYPASS === "true";
+
+  if (isDevMode && stored?.plan && stored.plan !== "FREE" && shopifyPlan === "FREE") {
+    // In dev / custom app mode, Shopify has no billing subscription contract active.
+    // Preserve the stored dev plan so features stay unlocked during local testing.
+    return { synced: true, changed: false, subscription: stored };
+  }
+
   // The trial window Shopify reports for the subscription the shop is on now. A
   // paid plan with no trial (Enterprise, or a shop that had already used theirs)
   // reports null, which clears any window left over from an earlier trial.

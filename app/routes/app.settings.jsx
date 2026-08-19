@@ -773,28 +773,11 @@ export default function Settings() {
       )}
 
       {/* Navigation Tabs */}
-      <div
-        style={{
-          display: "flex",
-          gap: "8px",
-          borderBottom: "1px solid var(--border-color)",
-          marginBottom: "24px",
-          flexWrap: "wrap",
-        }}
-      >
+      <div className="settings-nav-tabs">
         <button
           type="button"
           onClick={() => setActiveTab("general")}
-          style={{
-            padding: "10px 18px",
-            background: "none",
-            border: "none",
-            borderBottom: activeTab === "general" ? "3px solid #4f46e5" : "3px solid transparent",
-            color: activeTab === "general" ? "#4f46e5" : "var(--text-muted)",
-            fontWeight: activeTab === "general" ? "700" : "500",
-            fontSize: "14px",
-            cursor: "pointer",
-          }}
+          className={`settings-tab-btn ${activeTab === "general" ? "active" : ""}`}
         >
           General Preferences &amp; Rules
         </button>
@@ -802,23 +785,11 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("po")}
-          style={{
-            padding: "10px 18px",
-            background: "none",
-            border: "none",
-            borderBottom: activeTab === "po" ? "3px solid #4f46e5" : "3px solid transparent",
-            color: activeTab === "po" ? "#4f46e5" : "var(--text-muted)",
-            fontWeight: activeTab === "po" ? "700" : "500",
-            fontSize: "14px",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: "6px",
-          }}
+          className={`settings-tab-btn ${activeTab === "po" ? "active" : ""}`}
         >
           Purchase Orders (POs)
           {poGate.allowed && posList.length > 0 && (
-            <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
+            <span className="tab-badge">
               {posList.length}
             </span>
           )}
@@ -827,23 +798,11 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("subscribers")}
-          style={{
-            padding: "10px 18px",
-            background: "none",
-            border: "none",
-            borderBottom: activeTab === "subscribers" ? "3px solid #4f46e5" : "3px solid transparent",
-            color: activeTab === "subscribers" ? "#4f46e5" : "var(--text-muted)",
-            fontWeight: activeTab === "subscribers" ? "700" : "500",
-            fontSize: "14px",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: "6px",
-          }}
+          className={`settings-tab-btn ${activeTab === "subscribers" ? "active" : ""}`}
         >
           Customer Restock Alerts
           {restockGate.allowed && subscribersList.length > 0 && (
-            <span style={{ background: "#fef3c7", color: "#92400e", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
+            <span className="tab-badge">
               {subscribersList.length}
             </span>
           )}
@@ -852,32 +811,11 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("sms")}
-          style={{
-            padding: "10px 18px",
-            background: "none",
-            border: "none",
-            borderBottom: activeTab === "sms" ? "3px solid #4f46e5" : "3px solid transparent",
-            color: activeTab === "sms" ? "#4f46e5" : "var(--text-muted)",
-            fontWeight: activeTab === "sms" ? "700" : "500",
-            fontSize: "14px",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: "6px",
-          }}
+          className={`settings-tab-btn ${activeTab === "sms" ? "active" : ""}`}
         >
           SMS &amp; Klaviyo
           {smsGate.allowed && smsSettings?.enableSmsAlerts && (
-            <span
-              style={{
-                background: smsConfig.ready ? "#dcfce7" : "#fef3c7",
-                color: smsConfig.ready ? "#166534" : "#92400e",
-                padding: "2px 8px",
-                borderRadius: "12px",
-                fontSize: "11px",
-                fontWeight: "700",
-              }}
-            >
+            <span className="tab-badge">
               {smsConfig.ready ? "LIVE" : "SETUP"}
             </span>
           )}
@@ -886,23 +824,11 @@ export default function Settings() {
         <button
           type="button"
           onClick={() => setActiveTab("support")}
-          style={{
-            padding: "10px 18px",
-            background: "none",
-            border: "none",
-            borderBottom: activeTab === "support" ? "3px solid #4f46e5" : "3px solid transparent",
-            color: activeTab === "support" ? "#4f46e5" : "var(--text-muted)",
-            fontWeight: activeTab === "support" ? "700" : "500",
-            fontSize: "14px",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: "6px",
-          }}
+          className={`settings-tab-btn ${activeTab === "support" ? "active" : ""}`}
         >
           Support &amp; Help Desk
           {tickets.length > 0 && (
-            <span style={{ background: "#e0e7ff", color: "#3730a3", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: "700" }}>
+            <span className="tab-badge">
               {tickets.length}
             </span>
           )}
