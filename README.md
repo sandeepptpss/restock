@@ -79,22 +79,30 @@ For more information on the Shopify Dev MCP please read [the documentation](http
 
 ### Application Storage
 
-This app uses [MongoDB](https://www.mongodb.com/) through [Mongoose](https://mongoosejs.com/) for both Shopify session storage and its own inventory data.
+This app uses [MySQL](https://www.mysql.com/) (8.0 or newer) for both Shopify session storage and its own inventory data.
 
-- Connection: [app/db.server.js](app/db.server.js) — a single pooled connection cached on `global` so hot reload does not open a new pool per rebuild.
+- Connection: [app/db.server.js](app/db.server.js) — a single [mysql2](https://github.com/sidorares/node-mysql2) pool cached on `globalThis` so hot reload does not open a new pool per rebuild.
+- Mapper: [app/mysql.server.js](app/mysql.server.js) — a small document mapper that turns the model calls into SQL, generates each table from its schema, and keeps the indexes in step.
 - Schemas: [app/models/schemas.server.js](app/models/schemas.server.js) — sessions, settings, thresholds, rules, inventory events, automation logs, subscriptions, scheduled restocks.
-- Session storage: [app/models/session.server.js](app/models/session.server.js) — a Mongoose implementation of Shopify's `SessionStorage` interface, wired up in [app/shopify.server.js](app/shopify.server.js).
+- Session storage: [app/models/session.server.js](app/models/session.server.js) — an implementation of Shopify's `SessionStorage` interface, wired up in [app/shopify.server.js](app/shopify.server.js).
 
-Configure it with two environment variables (see `.env.example`):
+Configure it with five environment variables (see `.env.example`):
 
 ```shell
-MONGODB_URI="mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority"
-MONGODB_DB="stock-shield"
+MYSQL_HOST="localhost"
+MYSQL_PORT="3306"
+MYSQL_USER="<user>"
+MYSQL_PASSWORD="<password>"
+MYSQL_DATABASE="stock-shield"
 ```
 
-There is no migration step — Mongoose creates the collections and their indexes on first use. If `MONGODB_URI` is unset the app still boots: database-backed features fall back to defaults and empty lists rather than crashing.
+A single `MYSQL_URL="mysql://user:password@host:3306/stock-shield"` works too and takes precedence. URL-encode the password if it contains a reserved character (`@ : / ? # & %`).
 
-When deploying, make sure the host's outbound IP is on your Atlas **Network Access** allowlist, or connections will time out.
+There is no migration step — the app creates the database (if the user has permission), the tables and their indexes on first use, and adds a column when a schema gains a field. If `MYSQL_DATABASE` or `MYSQL_USER` is unset the app still boots: database-backed features fall back to defaults and empty lists rather than crashing.
+
+`npm run db:reset` truncates every table without dropping them.
+
+When deploying, make sure the app host can reach the MySQL server and that the user has `CREATE`, `ALTER` and `INDEX` rights on the database, or create the schema by hand first.
 
 ### Build
 
@@ -198,13 +206,15 @@ To test [streaming using await](https://reactrouter.com/api/components/Await#awa
 
 This is because a JWT token is expired. If you are consistently getting this error, it could be that the clock on your machine is not in sync with the server. To fix this ensure you have enabled "Set time and date automatically" in the "Date and Time" settings on your computer.
 
-### MongooseServerSelectionError / connection timeouts
+### MySQL connection errors or timeouts
 
 The connection is configured to fail after 10 seconds rather than hang a request. The usual causes:
 
-- The machine's public IP is not on the cluster's Atlas **Network Access** allowlist. A developer machine's IP changes; a deployed host needs its own entry.
-- The password in `MONGODB_URI` contains a reserved character (`@ : / ? # & %`) and was not URL-encoded.
-- `MONGODB_URI` is unset. The app logs `MONGODB_URI is not set — database features are disabled.` at boot and serves defaults instead of stored data.
+- `ER_ACCESS_DENIED_ERROR` — wrong `MYSQL_USER` / `MYSQL_PASSWORD`, or the user is not granted access from the app host. A user created as `'app'@'localhost'` cannot connect from another machine.
+- `ECONNREFUSED` — the server is not listening on `MYSQL_HOST:MYSQL_PORT`, or a firewall is in the way.
+- The password in `MYSQL_URL` contains a reserved character (`@ : / ? # & %`) and was not URL-encoded. Use the separate `MYSQL_*` variables instead and no encoding is needed.
+- `MYSQL_DATABASE` or `MYSQL_USER` is unset. The app logs `MYSQL_DATABASE / MYSQL_USER are not set — database features are disabled.` at boot and serves defaults instead of stored data.
+- `Could not ensure database exists` at boot is only a warning: the schema already exists, or the user may not create one. The app fails properly on the next query if the database is genuinely missing.
 
 ## Resources
 

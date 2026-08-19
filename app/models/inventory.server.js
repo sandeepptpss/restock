@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import mongoose, { isDbConfigured, tryConnectDB } from "../db.server";
+import db, { isDbConfigured, tryConnectDB } from "../db.server";
 import {
   AutomationLog,
   AutomationRule,
@@ -196,18 +196,18 @@ export async function updateInventorySettings(shop, data) {
   const existing = (await InventorySettings.findOne({ shop }).lean()) || DEFAULT_SETTINGS(shop);
 
   const mergedData = {
-    defaultLowStockLimit: data.defaultLowStockLimit != null ? (Number(data.defaultLowStockLimit) || 5) : existing.defaultLowStockLimit,
+    defaultLowStockLimit: data.defaultLowStockLimit != null && !isNaN(Number(data.defaultLowStockLimit)) ? Number(data.defaultLowStockLimit) : existing.defaultLowStockLimit,
     visibilityMode: data.visibilityMode || existing.visibilityMode || "UNLISTED",
     variantStrategy: data.variantStrategy || existing.variantStrategy || "HIDE_ALL_OOS",
     locationStrategy: data.locationStrategy || existing.locationStrategy || "ALL_LOCATIONS",
-    restockDelayValue: data.restockDelayValue != null ? (Number(data.restockDelayValue) || 0) : existing.restockDelayValue,
+    restockDelayValue: data.restockDelayValue != null && !isNaN(Number(data.restockDelayValue)) ? Number(data.restockDelayValue) : existing.restockDelayValue,
     restockDelayUnit: data.restockDelayUnit || existing.restockDelayUnit || "IMMEDIATE",
     enableAutoFill: data.enableAutoFill != null ? Boolean(data.enableAutoFill) : existing.enableAutoFill,
-    autoFillQuantity: data.autoFillQuantity != null ? (Number(data.autoFillQuantity) || 10) : existing.autoFillQuantity,
+    autoFillQuantity: data.autoFillQuantity != null && !isNaN(Number(data.autoFillQuantity)) ? Number(data.autoFillQuantity) : existing.autoFillQuantity,
     enableAutoHide: data.enableAutoHide != null ? Boolean(data.enableAutoHide) : existing.enableAutoHide,
     enableAutoTag: data.enableAutoTag != null ? Boolean(data.enableAutoTag) : existing.enableAutoTag,
-    outOfStockTag: data.outOfStockTag || existing.outOfStockTag || "out-of-stock",
-    lowStockTag: data.lowStockTag || existing.lowStockTag || "low-stock",
+    outOfStockTag: data.outOfStockTag != null ? String(data.outOfStockTag).trim() : (existing.outOfStockTag || "out-of-stock"),
+    lowStockTag: data.lowStockTag != null ? String(data.lowStockTag).trim() : (existing.lowStockTag || "low-stock"),
     enableLowStockBadge: data.enableLowStockBadge != null ? Boolean(data.enableLowStockBadge) : (existing.enableLowStockBadge ?? true),
     lowStockBadgeText: data.lowStockBadgeText != null ? data.lowStockBadgeText : (existing.lowStockBadgeText || "🔥 Only a few items left in stock!"),
     enableAutoPublish: data.enableAutoPublish != null ? Boolean(data.enableAutoPublish) : existing.enableAutoPublish,
@@ -218,8 +218,8 @@ export async function updateInventorySettings(shop, data) {
     alertEmail: data.alertEmail != null ? data.alertEmail : (existing.alertEmail || ""),
     notifyOnStockout: data.notifyOnStockout != null ? Boolean(data.notifyOnStockout) : (existing.notifyOnStockout ?? true),
     notifyOnRestock: data.notifyOnRestock != null ? Boolean(data.notifyOnRestock) : (existing.notifyOnRestock ?? true),
-    leadTimeDays: data.leadTimeDays != null ? (Number(data.leadTimeDays) || 14) : existing.leadTimeDays,
-    targetStockDays: data.targetStockDays != null ? (Number(data.targetStockDays) || 30) : existing.targetStockDays,
+    leadTimeDays: data.leadTimeDays != null && !isNaN(Number(data.leadTimeDays)) ? Number(data.leadTimeDays) : existing.leadTimeDays,
+    targetStockDays: data.targetStockDays != null && !isNaN(Number(data.targetStockDays)) ? Number(data.targetStockDays) : existing.targetStockDays,
     reviewPromptDismissed: data.reviewPromptDismissed != null ? Boolean(data.reviewPromptDismissed) : (existing.reviewPromptDismissed ?? false),
     enableSmsAlerts: data.enableSmsAlerts != null ? Boolean(data.enableSmsAlerts) : (existing.enableSmsAlerts ?? false),
     smsProvider: normalizeSmsProvider(data.smsProvider || existing.smsProvider),
@@ -654,7 +654,7 @@ export async function getVariantStockStates(shop) {
  */
 export async function annotateInventoryEvent(eventId, { productId, variantId }) {
   if (!isDbConfigured() || !eventId) return;
-  if (!mongoose.isValidObjectId(eventId)) return;
+  if (!db.isValidObjectId(eventId)) return;
   try {
     await tryConnectDB();
     await InventoryEvent.updateOne(
@@ -3039,7 +3039,7 @@ export async function scheduleProductRestock(
  */
 export async function executeScheduledRestock(admin, restockId, context = {}) {
   if (!isDbConfigured()) return null;
-  if (!mongoose.isValidObjectId(restockId)) {
+  if (!db.isValidObjectId(restockId)) {
     console.warn(`[ScheduledRestock] Ignoring job with invalid id: ${restockId}`);
     return null;
   }

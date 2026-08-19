@@ -1,15 +1,15 @@
-import mongoose from "../db.server";
+import db from "../db.server.js";
 
 /**
- * Mongoose schemas for every collection this app owns.
+ * Schemas for every table this app owns. Each becomes a MySQL table, created and
+ * kept in step by app/mysql.server.js.
  *
- * Documents are handed to React Router loaders, so reads use `.lean()` and go
- * through `plain()`/`plainAll()` below: a hydrated Mongoose document does not
- * serialize cleanly across the loader boundary, and callers expect a string
- * `id` field rather than an ObjectId `_id`.
+ * Rows are handed to React Router loaders, so reads go through
+ * `plain()`/`plainAll()` below: callers expect a string `id` field rather than
+ * the `_id` primary key the mapper returns.
  */
 
-const { Schema } = mongoose;
+const { Schema } = db;
 
 const timestamps = { timestamps: true };
 
@@ -129,8 +129,9 @@ const automationRuleSchema = new Schema(
     shop: { type: String, required: true },
     name: { type: String, required: true },
     enabled: { type: Boolean, default: true },
-    // Written by createAutomationRule. Declared here because Mongoose silently
-    // drops undeclared paths in strict mode, which lost every rule definition.
+    // Written by createAutomationRule. Declared here because an undeclared path
+    // has no column and is silently dropped on write, which lost every rule
+    // definition.
     trigger: { type: String, default: "inventory_levels/update" },
     conditions: { type: String, default: "" },
     actions: { type: String, default: "" },
@@ -304,7 +305,7 @@ supportTicketSchema.index({ shop: 1, createdAt: -1 });
 // A ticket id addresses one ticket, so the database has to agree that it does.
 // The previous ids were four random digits out of 9,000, which by the birthday
 // bound duplicate at around 112 tickets — and an update matched on the id would
-// then have hit whichever of the two Mongo happened to find first.
+// then have hit whichever of the two the database happened to find first.
 supportTicketSchema.index({ ticketId: 1 }, { unique: true });
 
 const backInStockSubscriberSchema = new Schema(
@@ -358,17 +359,16 @@ purchaseOrderSchema.index({ shop: 1, createdAt: -1 });
  * Register a model, replacing one that an earlier evaluation of this file left
  * behind with a now-outdated schema.
  *
- * `mongoose.models` lives on the singleton mongoose instance, so a dev-server
- * hot reload re-runs this module but keeps the model compiled from the *old*
- * schema. Every path added since then is then dropped on write (strict mode)
- * and stripped from queries (`strictQuery`), both silently. That is how
- * `variantId` stopped being stored on automation logs, which in turn collapsed
- * the per-variant email de-duplication into a per-product one and suppressed
- * every other variant's alert.
+ * The model registry lives on `globalThis`, so a dev-server hot reload re-runs
+ * this module but keeps the model built from the *old* schema. Every path added
+ * since then is then dropped on write and stripped from queries, both silently.
+ * That is how `variantId` stopped being stored on automation logs, which in turn
+ * collapsed the per-variant email de-duplication into a per-product one and
+ * suppressed every other variant's alert.
  */
 const model = (name, schema) => {
-  const cached = mongoose.models[name];
-  if (!cached) return mongoose.model(name, schema);
+  const cached = db.models[name];
+  if (!cached) return db.model(name, schema);
 
   const missingPath = Object.keys(schema.paths).find((path) => !cached.schema.paths[path]);
   if (!missingPath) return cached;
@@ -376,8 +376,8 @@ const model = (name, schema) => {
   console.warn(
     `[schemas] Recompiling the ${name} model — the registered one predates '${missingPath}'`
   );
-  mongoose.deleteModel(name);
-  return mongoose.model(name, schema);
+  db.deleteModel(name);
+  return db.model(name, schema);
 };
 
 export const Session = model("Session", sessionSchema);

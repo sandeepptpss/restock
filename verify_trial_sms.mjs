@@ -15,7 +15,7 @@ import fs from "node:fs";
 
 const plans = await import("./app/utils/planLimits.js");
 
-// sms.server.js imports inventory.server.js, which pulls in Mongoose and the whole
+// sms.server.js imports inventory.server.js, which pulls in the database layer and the whole
 // data layer. Only the two named exports are needed, and neither is reached on the
 // paths under test, so they are replaced with stubs and the module is loaded from
 // memory.

@@ -1242,13 +1242,38 @@ export default function Settings() {
               <input
                 type="hidden"
                 name="items"
-                value={JSON.stringify([
-                  {
-                    productId: "manual-item",
-                    productTitle: poItemTitle || "Low Stock Inventory Batch",
-                    reorderQty: Number(poTargetQty) || 50,
-                  },
-                ])}
+                value={JSON.stringify(
+                  (() => {
+                    const raw = (poItemTitle || "").trim();
+                    const targetQty = Number(poTargetQty) || 50;
+                    const num = !isNaN(Number(raw)) && Number(raw) > 0 ? Math.min(Number(raw), 500) : 0;
+                    if (num > 0) {
+                      return Array.from({ length: num }, (_, idx) => ({
+                        productId: `manual-item-${idx + 1}`,
+                        productTitle: `Batch Item #${idx + 1}`,
+                        reorderQty: targetQty,
+                      }));
+                    }
+                    if (raw.includes(",") || raw.includes("\n")) {
+                      return raw
+                        .split(/,|\n/)
+                        .map((t) => t.trim())
+                        .filter(Boolean)
+                        .map((title, idx) => ({
+                          productId: `manual-item-${idx + 1}`,
+                          productTitle: title,
+                          reorderQty: targetQty,
+                        }));
+                    }
+                    return [
+                      {
+                        productId: "manual-item",
+                        productTitle: raw || "Low Stock Inventory Batch",
+                        reorderQty: targetQty,
+                      },
+                    ];
+                  })()
+                )}
               />
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px", marginBottom: "18px" }}>
@@ -1326,7 +1351,7 @@ export default function Settings() {
                   <th>PO Number</th>
                   <th>Supplier</th>
                   <th>Contact Email</th>
-                  <th>Items Count</th>
+                  <th>Items &amp; Reorder Qty</th>
                   <th>Status</th>
                   <th>Created Date</th>
                   <th>Actions</th>
@@ -1340,118 +1365,173 @@ export default function Settings() {
                     </td>
                   </tr>
                 ) : (
-                  posList.map((po) => (
-                    <tr key={po.id || po.poNumber}>
-                      <td style={{ fontWeight: "700", color: "#4f46e5" }}>{po.poNumber}</td>
-                      <td style={{ fontWeight: "600" }}>{po.supplierName}</td>
-                      <td>{po.supplierEmail || "N/A"}</td>
-                      <td>{po.totalItems || po.items?.length || 1} Item(s)</td>
-                      <td style={{ whiteSpace: "nowrap" }}>
-                        {po.status === "DRAFT" && (
-                          <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
-                            Draft
-                          </span>
-                        )}
-                        {po.status === "SENT" && (
-                          <span className="badge badge-warning" style={{ background: "#dbeafe", color: "#1e40af", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
-                            Dispatched
-                          </span>
-                        )}
-                        {po.status === "RECEIVED" && (
-                          <span className="badge badge-healthy" style={{ background: "#dcfce7", color: "#15803d", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
-                            Stock Received
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ whiteSpace: "nowrap" }}>{po.createdAt ? new Date(po.createdAt).toLocaleDateString() : "Today"}</td>
-                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                        <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
+                  posList.map((po) => {
+                    let itemCount = 0;
+                    let totalUnits = 0;
+                    let titleSummary = "";
+
+                    if (Array.isArray(po.items) && po.items.length > 0) {
+                      totalUnits = po.items.reduce((sum, i) => sum + (Number(i.reorderQty) || 50), 0);
+
+                      if (po.items.length === 1 && po.items[0]?.productTitle) {
+                        const titleNum = Number(po.items[0].productTitle.trim());
+                        if (!isNaN(titleNum) && titleNum > 0) {
+                          itemCount = titleNum;
+                          titleSummary = `Numeric Batch (${titleNum} items)`;
+                        } else {
+                          itemCount = 1;
+                          titleSummary = po.items[0].productTitle;
+                        }
+                      } else {
+                        itemCount = po.items.length;
+                        titleSummary = po.items.map((i) => i.productTitle).filter(Boolean).join(", ");
+                      }
+                    } else if (typeof po.totalItems === "number" && !isNaN(po.totalItems) && po.totalItems > 0) {
+                      itemCount = po.totalItems;
+                      totalUnits = itemCount * 50;
+                    } else {
+                      itemCount = 1;
+                      totalUnits = 50;
+                    }
+
+                    const handleEmailSupplier = () => {
+                      const subject = "Purchase Order " + (po.poNumber || "");
+                      const body = "Dear Supplier,\n\nPlease process Purchase Order " + (po.poNumber || "") + " for our store.\n\nThank you!";
+                      const mailUrl = "mailto:" + encodeURIComponent(po.supplierEmail || "") + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
+                      if (typeof window !== "undefined" && window.top && window.top !== window) {
+                        window.top.location.href = mailUrl;
+                      } else if (typeof window !== "undefined") {
+                        window.open(mailUrl, "_blank");
+                      }
+                    };
+
+                    return (
+                      <tr key={po.id || po.poNumber}>
+                        <td style={{ fontWeight: "700", color: "#4f46e5" }}>{po.poNumber}</td>
+                        <td style={{ fontWeight: "600" }}>{po.supplierName}</td>
+                        <td>{po.supplierEmail || "N/A"}</td>
+                        <td>
+                          <div style={{ fontWeight: "700", color: "#1e1b4b" }}>{itemCount} Item(s)</div>
+                          <div style={{ fontSize: "11px", color: "#4f46e5", fontWeight: "600", marginTop: "2px" }}>
+                            {totalUnits > 0 ? `${totalUnits.toLocaleString()} units` : "50 units"}
+                          </div>
+                          {titleSummary && (
+                            <div
+                              style={{
+                                fontSize: "11px",
+                                color: "var(--text-muted)",
+                                maxWidth: "170px",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                marginTop: "2px",
+                              }}
+                              title={titleSummary}
+                            >
+                              {titleSummary}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ whiteSpace: "nowrap" }}>
                           {po.status === "DRAFT" && (
-                            <fetcher.Form method="post" style={{ display: "inline" }}>
-                              <input type="hidden" name="intent" value="update_po_status" />
-                              <input type="hidden" name="poId" value={po.id} />
-                              <input type="hidden" name="status" value="SENT" />
-                              <button
-                                type="submit"
-                                className="btn-primary"
-                                style={{
-                                  padding: "6px 14px",
-                                  fontSize: "12px",
-                                  background: "#312e81",
-                                  color: "#ffffff",
-                                  border: "none",
-                                  borderRadius: "6px",
-                                  fontWeight: "600",
-                                  whiteSpace: "nowrap",
-                                  cursor: "pointer",
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                }}
-                              >
-                                Mark Sent
-                              </button>
-                            </fetcher.Form>
+                            <span className="badge badge-warning" style={{ background: "#fef3c7", color: "#92400e", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                              Draft
+                            </span>
                           )}
                           {po.status === "SENT" && (
-                            <fetcher.Form method="post" style={{ display: "inline" }}>
-                              <input type="hidden" name="intent" value="update_po_status" />
-                              <input type="hidden" name="poId" value={po.id} />
-                              <input type="hidden" name="status" value="RECEIVED" />
-                              <button
-                                type="submit"
-                                className="btn-primary"
-                                style={{
-                                  padding: "6px 14px",
-                                  fontSize: "12px",
-                                  background: "#059669",
-                                  color: "#ffffff",
-                                  border: "none",
-                                  borderRadius: "6px",
-                                  fontWeight: "600",
-                                  whiteSpace: "nowrap",
-                                  cursor: "pointer",
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                }}
-                              >
-                                Mark Received
-                              </button>
-                            </fetcher.Form>
+                            <span className="badge badge-warning" style={{ background: "#dbeafe", color: "#1e40af", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                              Dispatched
+                            </span>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const mailUrl = `mailto:${encodeURIComponent(po.supplierEmail || "")}?subject=${encodeURIComponent(`Purchase Order ${po.poNumber}`)}&body=${encodeURIComponent(`Dear Supplier,\n\nPlease process Purchase Order ${po.poNumber} for our store.\n\nThank you!`)}`;
-                              if (window.top && window.top !== window) {
-                                window.top.location.href = mailUrl;
-                              } else {
-                                window.open(mailUrl, "_blank");
-                              }
-                            }}
-                            className="btn-secondary"
-                            style={{
-                              padding: "6px 14px",
-                              fontSize: "12px",
-                              background: "#f1f5f9",
-                              color: "#475569",
-                              border: "1px solid #cbd5e1",
-                              borderRadius: "6px",
-                              fontWeight: "600",
-                              whiteSpace: "nowrap",
-                              cursor: "pointer",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                            }}
-                          >
-                            Email Supplier
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
+                          {po.status === "RECEIVED" && (
+                            <span className="badge badge-healthy" style={{ background: "#dcfce7", color: "#15803d", padding: "4px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: "700", whiteSpace: "nowrap", display: "inline-block" }}>
+                              Stock Received
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ whiteSpace: "nowrap" }}>{po.createdAt ? new Date(po.createdAt).toLocaleDateString() : "Today"}</td>
+                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
+                            {po.status === "DRAFT" && (
+                              <fetcher.Form method="post" style={{ display: "inline" }}>
+                                <input type="hidden" name="intent" value="update_po_status" />
+                                <input type="hidden" name="poId" value={po.id} />
+                                <input type="hidden" name="status" value="SENT" />
+                                <button
+                                  type="submit"
+                                  className="btn-primary"
+                                  style={{
+                                    padding: "6px 14px",
+                                    fontSize: "12px",
+                                    background: "#312e81",
+                                    color: "#ffffff",
+                                    border: "none",
+                                    borderRadius: "6px",
+                                    fontWeight: "600",
+                                    whiteSpace: "nowrap",
+                                    cursor: "pointer",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                  }}
+                                >
+                                  Mark Sent
+                                </button>
+                              </fetcher.Form>
+                            )}
+                            {po.status === "SENT" && (
+                              <fetcher.Form method="post" style={{ display: "inline" }}>
+                                <input type="hidden" name="intent" value="update_po_status" />
+                                <input type="hidden" name="poId" value={po.id} />
+                                <input type="hidden" name="status" value="RECEIVED" />
+                                <button
+                                  type="submit"
+                                  className="btn-primary"
+                                  style={{
+                                    padding: "6px 14px",
+                                    fontSize: "12px",
+                                    background: "#059669",
+                                    color: "#ffffff",
+                                    border: "none",
+                                    borderRadius: "6px",
+                                    fontWeight: "600",
+                                    whiteSpace: "nowrap",
+                                    cursor: "pointer",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                  }}
+                                >
+                                  Mark Received
+                                </button>
+                              </fetcher.Form>
+                            )}
+                            <button
+                              type="button"
+                              onClick={handleEmailSupplier}
+                              className="btn-secondary"
+                              style={{
+                                padding: "6px 14px",
+                                fontSize: "12px",
+                                background: "#f1f5f9",
+                                color: "#475569",
+                                border: "1px solid #cbd5e1",
+                                borderRadius: "6px",
+                                fontWeight: "600",
+                                whiteSpace: "nowrap",
+                                cursor: "pointer",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              Email Supplier
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>

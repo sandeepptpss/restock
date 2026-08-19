@@ -3,13 +3,12 @@ import { connectDB } from "../db.server";
 import { Session } from "./schemas.server";
 
 /**
- * Mongoose implementation of Shopify's SessionStorage interface.
+ * MySQL implementation of Shopify's SessionStorage interface.
  *
- * Replaces PrismaSessionStorage. Online-session user data is flattened into
- * columns the same way Prisma's adapter did, so an online session round-trips
- * with its `onlineAccessInfo` intact.
+ * Online-session user data is flattened into columns rather than nested, so an
+ * online session round-trips with its `onlineAccessInfo` intact.
  */
-export class MongooseSessionStorage {
+export class MySqlSessionStorage {
   async storeSession(session) {
     await connectDB();
     await Session.updateOne(

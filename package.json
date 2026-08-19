@@ -17,7 +17,8 @@
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
     "db:reset": "node reset_db.mjs",
-    "verify": "node verify_pure_logic.mjs && node verify_trial_sms.mjs && node verify_roi_metrics.mjs"
+    "verify": "node verify_pure_logic.mjs && node verify_trial_sms.mjs && node verify_roi_metrics.mjs",
+    "db:migrate": "node migrate_mongo_to_mysql.mjs"
   },
   "type": "module",
   "engines": {
@@ -31,7 +32,7 @@
     "@shopify/app-bridge-react": "^4.2.4",
     "@shopify/shopify-app-react-router": "^1.2.1",
     "isbot": "^5.1.31",
-    "mongoose": "^9.9.2",
+    "mysql2": "^3.23.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router": "^7.12.0",
@@ -53,6 +54,7 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^4.6.2",
     "graphql-config": "^5.1.1",
+    "mongodb": "^7.5.0",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3",
     "vite": "^6.3.6"
