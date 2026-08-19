@@ -78,7 +78,7 @@ export default function RoiPage() {
 
         <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
           {/* Timeframe Filter Pills */}
-          <div style={{ display: "flex", background: "#e2e8f0", padding: "3px", borderRadius: "10px" }}>
+          <div style={{ display: "flex", background: "#f1f5f9", border: "1px solid #e2e8f0", padding: "4px", borderRadius: "10px" }}>
             {[
               { id: "30days", label: "Last 30 Days" },
               { id: "90days", label: "90 Days" },
@@ -91,23 +91,18 @@ export default function RoiPage() {
                   border: "none",
                   background: timeframe === tf.id ? "#ffffff" : "transparent",
                   color: timeframe === tf.id ? "#0f172a" : "#64748b",
-                  fontWeight: timeframe === tf.id ? "700" : "500",
+                  fontWeight: timeframe === tf.id ? "700" : "600",
                   fontSize: "12px",
-                  padding: "6px 12px",
-                  borderRadius: "8px",
+                  padding: "6px 14px",
+                  borderRadius: "7px",
                   cursor: "pointer",
-                  boxShadow: timeframe === tf.id ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                  boxShadow: timeframe === tf.id ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
                   transition: "all 0.15s ease",
                 }}
               >
                 {tf.label}
               </button>
             ))}
-          </div>
-
-          <div style={{ display: "inline-flex", alignItems: "center", gap: "6px", background: "#ffffff", border: "1px solid #cbd5e1", padding: "6px 12px", borderRadius: "8px", fontSize: "12px", fontWeight: "600", color: "#334155" }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
-            {shop}
           </div>
         </div>
       </div>
